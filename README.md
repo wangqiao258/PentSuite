@@ -27,10 +27,10 @@ PentSuite/
 │  │  ├─ schema.sql        经验库建表 DDL（自建 Supabase 时执行）
 │  │  ├─ dict.txt          经验检索词典
 │  │  ├─ requirements.txt  经验层依赖清单（psycopg2/jieba/rank-bm25）
-│  │  └─ creds.json        云库凭据（gitignore，绝不入 git）
-│  └─ data/pentdb.db       SQLite 事实库（真实数据，**不入 git 不入发行包**）
+│  │  └─ creds.json        经验库云凭据（自行创建，见安装）
+│  └─ data/pentdb.db       SQLite 事实库（init 生成，仅存本机）
 ├─ skill/pentest-kb-workflow/SKILL.md   方法论 skill（纯 SKILL.md，直接装入）
-├─ .venv/                  套件唯一运行时（bootstrap 创建，gitignore）
+├─ .venv/                  套件唯一运行时（bootstrap 创建）
 └─ README.md               本文件
 ```
 
@@ -91,6 +91,6 @@ python pentdb/pentdb.py kb search --keyword 测试   # 未配凭据时返回友�
 cd pentdb && python -m unittest test_sop          # 15 用例回归
 ```
 
-- 数据边界：仓库不含真实数据与凭据（`data/`、`kb/creds.json`、`.venv/` 均 gitignore）；经验库凭据存 `pentdb/kb/creds.json`，绝不入 git
+- 数据存放：事实库 `pentdb/data/pentdb.db`、经验库凭据 `pentdb/kb/creds.json` 均为本地文件，clone 后不存在、按需生成，套件不会自动上传任何内容
 - 旧机器迁移经验库凭据：`pentdb.py bootstrap --kb-creds <creds.json>`
 - 自用迁移（多机器带数据）：手工压缩整个目录（含 pentdb/data/），自行保管，与 GitHub 互不干扰

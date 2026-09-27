@@ -664,7 +664,7 @@ def _bootstrap_creds(src):
         sys.exit(f"[x] {src} 中未找到经验库凭据（PENTEST_KB_DB_*）")
     with open(KB_CREDS, "w", encoding="utf-8") as f:
         json.dump(creds, f, ensure_ascii=False, indent=2)
-    print(f"[ok] 经验库凭据已写入 {KB_CREDS}（gitignore，绝不入 git）")
+    print(f"[ok] 经验库凭据已写入 {KB_CREDS}（仅存本机）")
 
 def cmd_bootstrap(a):
     if not a.skip_deps:
