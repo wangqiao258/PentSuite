@@ -1,0 +1,15 @@
+# 真实目标数据一律不入库
+data/
+*.db
+*.db-journal
+downloads/
+.venv/
+creds.json
+
+# 运行产物
+__pycache__/
+*.pyc
+dist/
+
+# 工作区私有配置
+.workbuddy/

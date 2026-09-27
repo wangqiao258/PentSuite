@@ -1,0 +1,5 @@
+# pentest-kb 经验库依赖（CLI 子命令 kb-* 使用；PentDB 其余功能零依赖）
+# 2026-09-28 MCP 退役：不再需要 mcp 框架
+psycopg2-binary>=2.9,<3
+jieba>=0.42
+rank-bm25>=0.2
