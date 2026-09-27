@@ -1,7 +1,7 @@
 """pentest-kb 经验库核心逻辑（原 MCP 服务内核，2026-09-28 CLI 化）。
 
 供 pentdb.py 的 kb-* 子命令调用；凭据从环境变量 PENTEST_KB_DB_* 或
-同目录 creds.json（gitignore，bootstrap 迁移生成）读取。
+同目录 creds.json（随仓库分发的空模板，填值即用）读取。
 存储在用户自建的 Supabase 云库（pentest_knowledge 表，见 schema.sql）。
 """
 
@@ -21,7 +21,7 @@ from psycopg2.extras import Json
 from psycopg2.pool import ThreadedConnectionPool
 from rank_bm25 import BM25Okapi
 
-# ===== 数据库连接参数：环境变量优先，其次同目录 creds.json（不入 git）=====
+# ===== 数据库连接参数：环境变量优先，其次同目录 creds.json（空模板随仓库分发，真实值仅存本机）=====
 _CREDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "creds.json")
 
 REQUIRED_KEYS = ("host", "user", "password")
