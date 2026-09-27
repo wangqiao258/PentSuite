@@ -27,7 +27,7 @@ PentSuite/
 │  │  ├─ schema.sql        经验库建表 DDL（自建 Supabase 时执行）
 │  │  ├─ dict.txt          经验检索词典
 │  │  ├─ requirements.txt  经验层依赖清单（psycopg2/jieba/rank-bm25）
-│  │  └─ creds.json        经验库云凭据（自行创建，见安装）
+│  │  └─ creds.json        经验库云凭据（bootstrap 生成骨架，填值即用）
 │  └─ data/pentdb.db       SQLite 事实库（init 生成，仅存本机）
 ├─ skill/pentest-kb-workflow/SKILL.md   方法论 skill（纯 SKILL.md，直接装入）
 ├─ .venv/                  套件唯一运行时（bootstrap 创建）
@@ -81,7 +81,7 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 前置：PentDB CLI/面板零依赖；经验库需要 Python 3.10+（bootstrap 建 venv）。
 
 1. **装 skill**：把 `skill/pentest-kb-workflow/` 按所用客户端的技能方式装入（WorkBuddy：拖拽；Claude Code：复制到其 skills 目录；其他客户端：让 AI 直接读该文件亦可）。首次使用时 AI 会询问"PentSuite 克隆在哪个目录？"并把路径写入 skill 目录的 `home.txt`——一次配置，长期有效。
-2. **（可选）经验库**：`python pentdb/pentdb.py bootstrap`（建套件 .venv、装 kb 依赖）→ 注册 Supabase 免费实例 → SQL Editor 执行 `pentdb/kb/schema.sql` → 创建 `pentdb/kb/creds.json`（host/port/dbname/user/password）。不用经验库可全部跳过——PentDB 事实层全套零依赖照常可用。
+2. **（可选）经验库**：`python pentdb/pentdb.py bootstrap`（建套件 .venv、装 kb 依赖、生成凭据骨架 `pentdb/kb/creds.json`）→ 注册 Supabase 免费实例 → SQL Editor 执行 `pentdb/kb/schema.sql` → 在骨架中填入 host / user / password 三项即用。不用经验库可全部跳过——PentDB 事实层全套零依赖照常可用。
 3. **验证**：
 
 ```bash

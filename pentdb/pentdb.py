@@ -653,18 +653,30 @@ def _bootstrap_deps():
     print("[ok] 依赖就绪（PentDB 零依赖，此 venv 仅供 kb-* 子命令使用）")
 
 
+_CREDS_OUT_KEYS = {"PENTEST_KB_DB_HOST": "host", "PENTEST_KB_DB_PORT": "port",
+                   "PENTEST_KB_DB_NAME": "dbname", "PENTEST_KB_DB_USER": "user",
+                   "PENTEST_KB_DB_PASSWORD": "password"}
+
+
 def _bootstrap_creds(src):
-    """从旧机器的 mcp.json（MCP 时代遗留）或 creds.json 抓取经验库凭据。"""
+    """从旧机器的 mcp.json（MCP 时代遗留）或 creds.json 抓取经验库凭据，统一写小写键。"""
     old = json.load(open(src, encoding="utf-8"))
     env = (old.get("mcpServers", {}).get("pentest-kb", {}) or {}).get("env", {})
-    creds = {k: env.get(k, "") for k in KB_ENV_KEYS}
-    if not creds.get("PENTEST_KB_DB_HOST"):
-        creds = {k: old.get(k, "") for k in KB_ENV_KEYS}  # 已是 creds.json 格式
-    if not creds.get("PENTEST_KB_DB_HOST"):
-        sys.exit(f"[x] {src} 中未找到经验库凭据（PENTEST_KB_DB_*）")
+    creds = {out: env.get(up, "") or old.get(out, "")
+             for up, out in _CREDS_OUT_KEYS.items()}
+    if not creds.get("host"):
+        sys.exit(f"[x] {src} 中未找到经验库凭据（mcpServers.env 或 creds.json 格式）")
     with open(KB_CREDS, "w", encoding="utf-8") as f:
         json.dump(creds, f, ensure_ascii=False, indent=2)
     print(f"[ok] 经验库凭据已写入 {KB_CREDS}（仅存本机）")
+
+
+def _creds_skeleton():
+    if not os.path.exists(KB_CREDS):
+        with open(KB_CREDS, "w", encoding="utf-8") as f:
+            json.dump({"host": "", "port": "5432", "dbname": "postgres",
+                       "user": "", "password": ""}, f, ensure_ascii=False, indent=2)
+        print(f"[ok] 已生成凭据骨架 {KB_CREDS}：填入 host / user / password 三项即用")
 
 def cmd_bootstrap(a):
     if not a.skip_deps:
@@ -672,11 +684,9 @@ def cmd_bootstrap(a):
     if a.kb_creds:
         _bootstrap_creds(a.kb_creds)
     print("\n===== 经验库（可选）=====")
+    _creds_skeleton()
     if os.path.exists(KB_CREDS):
-        print(f"[=] 凭据已配置: {KB_CREDS}；验证: pentdb.py kb list")
-    else:
-        print("[=] 未配置（不影响 PentDB 其余功能）。启用：注册 Supabase → SQL Editor 执行 pentdb/kb/schema.sql →")
-        print("    pentdb.py bootstrap --kb-creds <含 PENTEST_KB_DB_* 的文件>，或手工建 pentdb/kb/creds.json")
+        print(f"[=] 凭据文件: {KB_CREDS}（未填值不影响 PentDB 其余功能）；验证: pentdb.py kb list")
     print("===== PentDB =====")
     print(f"数据根（缺省即此）: {os.path.join(BASE, 'data', 'pentdb.db')}")
     print("  开面板: pentdb.py panel --project <目标>")
