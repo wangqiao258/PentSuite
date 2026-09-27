@@ -82,6 +82,12 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 
 1. **装 skill**：把 `skill/pentest-kb-workflow/` 按所用客户端的技能方式装入（WorkBuddy：拖拽；Claude Code：复制到其 skills 目录；其他客户端：让 AI 直接读该文件亦可）。首次使用时 AI 会询问"PentSuite 克隆在哪个目录？"并把路径写入 skill 目录的 `home.txt`——一次配置，长期有效。
 2. **（可选）经验库**：`python pentdb/pentdb.py bootstrap`（建套件 .venv、装 kb 依赖）→ 注册 Supabase 免费实例 → SQL Editor 执行 `pentdb/kb/schema.sql` → 凭据模板 `pentdb/kb/creds.json` 已随仓库自带，填入 host / user / password 三项即用。若你打算把自己的副本推到别的仓库，先 `git update-index --skip-worktree pentdb/kb/creds.json` 让 git 停止跟踪它。不用经验库可全部跳过——PentDB 事实层全套零依赖照常可用。
+
+   三个值都在 Supabase 控制台 **Project Settings → Database**：
+   - **host** = Connection pooler 的主机名（形如 `xxx.pooler.supabase.com`）
+   - **user** = `postgres.<项目ref>`（连接串里 `@` 前面那段）
+   - **password** = 建项目时设置的数据库密码（忘了可在同页 Reset 重置）
+   - port / dbname 已预填 `5432` / `postgres`，无需改动
 3. **验证**：
 
 ```bash
