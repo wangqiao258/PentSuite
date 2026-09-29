@@ -401,33 +401,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "enabled": enabled or all_stages})
             finally:
                 c.close()
-        if u.path == "/api/waive":
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
-            eid, term, reason = data.get("id"), data.get("term", ""), (data.get("reason") or "").strip()
-            if eid is None or not term or not reason:
-                return self._json({"error": "id/term/reason 必填，豁免必须留痕"}, 400)
-            import datetime
-            c = db()
-            try:
-                if int(eid) == 0:
-                    project = data.get("project", "")
-                    if not c.execute("SELECT 1 FROM projects WHERE name=?", (project,)).fetchone():
-                        return self._json({"error": "project not found"}, 404)
-                else:
-                    row = c.execute("SELECT project FROM raw_events WHERE id=?", (eid,)).fetchone()
-                    if not row:
-                        return self._json({"error": "no event"}, 404)
-                    project = row["project"]
-                now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-                c.execute("INSERT INTO waives(project,event_id,term,reason,at) VALUES(?,?,?,?,?)",
-                          (project, int(eid), term, reason, now))
-                c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
-                          (project, "waive", f"#{eid} {term}: {reason}（面板）", now))
-                c.commit()
-                return self._json({"ok": True})
-            finally:
-                c.close()
         if u.path != "/api/review":
             return self._json({"error": "not found"}, 404)
         n = int(self.headers.get("Content-Length", 0))

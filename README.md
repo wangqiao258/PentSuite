@@ -62,7 +62,8 @@ PentSuite/
 | 证据 | `evidence --project P --event-id N --path F`（默认复制进套件；`--text` 直存文本；`--event-id 0`=项目级物料）；`evidence-move --id N --event-id M` 改挂归属 |
 | AI 推断 | `add ... --confidence high\|medium\|low`（推断类禁止 confirmed，一律 new 进待审） |
 | 查询 | `query --project P [--kind][--status]` |
-| SOP 提示 | `sop --project P`（查漏补缺提示清单：when 触发语义 + check 提示术语，AI 语义判断命中后对照自查；**提示层非门禁**，覆盖度由 AI 显式申报、人背书）；豁免 `waive --project P --id N --term T --reason R`（起草态不生效；人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
+| SOP 提示 | `sop --project P`（查漏补缺提示清单：when 触发语义 + check 提示术语，AI 语义判断命中后对照自查；**提示层非门禁、非义务，不设豁免**，覆盖度由 AI 显式申报、人背书） |
+| 豁免 | `waive --project P --id N --term T --reason R`（只作用于具体事件：报文豁免挂 finding、归因豁免挂 test；起草态不生效，人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
 | 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |

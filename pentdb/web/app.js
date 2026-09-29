@@ -17,7 +17,7 @@ async function boot(){
 }
 function loadAll(){loadOverview();loadSop();loadLint();loadFindings();loadAssets();loadTimeline();loadReview();loadReport()}
 
-const ST_TXT={done:"✓ 已测",registered:"◐ 已登记",missing:"○ 未测(提示)",waived:"⊘ 已豁免"};
+const ST_TXT={done:"✓ 已测",registered:"◐ 已登记",missing:"○ 未测(提示)"};
 let sopFilter=null;
 async function loadSop(){
   const d=await api("sop",{project:PROJECT});
@@ -38,10 +38,9 @@ async function loadSop(){
     :`<div class="card"><b>${n}</b><span>${label}</span></div>`;
   $("#sop-cards").innerHTML=
     sc(d.total,"提示项","")+sc(d.done,"✓ 已测","done")+
-    sc(d.registered,"◐ 已登记","registered")+sc(d.missing,"○ 未测","missing")+
-    sc(d.waived,"⊘ 已豁免","waived");
+    sc(d.registered,"◐ 已登记","registered")+sc(d.missing,"○ 未测","missing");
   // 阶段视图：计划（菜单）× 执行（test 流水）；状态过滤时只留含匹配项的阶段
-  const SV_TXT={done:"✓",registered:"◐",missing:"○",waived:"⊘"};
+  const SV_TXT={done:"✓",registered:"◐",missing:"○"};
   $("#stage-view").innerHTML=(d.stage_view||[]).filter(v=>
     !sopFilter||v.menu.some(it=>it.state===sopFilter)).map(v=>{
     const menuItems=sopFilter?v.menu.filter(it=>it.state===sopFilter):v.menu;
@@ -49,8 +48,6 @@ async function loadSop(){
       let h=`<span class="sopitem st-${it.state}" title="${ST_TXT[it.state]}${it.when?"："+it.when:""}（提示层，非门禁）">${SV_TXT[it.state]} ${esc(it.term)}`;
       if(it.state==="missing"&&it.when)h+=` <span class="muted">${esc(it.when)}</span>`;
       if(it.state==="done"&&it.ev)h+=` <span class="muted">${it.ev}</span>`;
-      if(it.state==="missing"||it.state==="registered")
-        h+=`<button onclick="doWaive(0,'${esc(it.term).replace(/'/g,"&#39;")}')">豁免</button>`;
       return h+`</span>`;
     }).join("")||"<span class='muted'>该阶段无提示项</span>";
     const exe=v.executed.length?v.executed.map(t=>
@@ -60,7 +57,7 @@ async function loadSop(){
       `<div class="src">归因: ${t.parent_ext?esc(t.parent_ext):"—"} ｜ 来源: ${esc(t.source)}</div></div>`).join("")
       :"<span class='muted'>暂无执行流水（AI 执行后 add --kind test --stage "+esc(v.stage)+" 落库即在此聚合）</span>";
     const pend=(v.pending.length&&(!sopFilter||sopFilter==="registered"))?`<div class="muted" style="margin:2px 0">登记待执行：${v.pending.map(p=>esc(p.term)).join("、")}</div>`:"";
-    return `<div class="grp"><h4>${v.complete?"✓ ":""}${esc(v.stage)}（${v.done+v.waived}/${v.total} 完成 · 流水 ${v.executed.length} 条）</h4>`+
+    return `<div class="grp"><h4>${v.complete?"✓ ":""}${esc(v.stage)}（${v.done}/${v.total} 参考 · 流水 ${v.executed.length} 条）</h4>`+
       `<div style="margin-bottom:4px">${menu}</div>${pend}`+
       `<details ${v.executed.length?"open":""}><summary class="muted" style="cursor:pointer">执行流水（${v.executed.length}）</summary>${exe}</details></div>`;
   }).join("")||(sopFilter?"<div class='muted'>当前状态过滤下无阶段菜单项</div>":"<div class='muted'>无阶段数据</div>");
@@ -81,14 +78,6 @@ async function toggleStage(s){
   setTimeout(()=>{el.textContent=""},2000);
   loadSop();
 }
-async function doWaive(id,term){
-  const reason=prompt("豁免「"+term+"」的理由（必填，收尾时提交裁决）：");
-  if(!reason)return;
-  await fetch("/api/waive",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({id,term,reason,project:PROJECT})});
-  loadSop();
-}
-
 async function loadLint(btn){
   const t0=new Date().toLocaleTimeString();
   if(btn){btn.disabled=true;btn.textContent="检查中…";}

@@ -1055,7 +1055,7 @@ def cmd_bootstrap(a):
 
 # ---------------- SOP 提示清单（给 AI 的查漏补缺提示层，非门禁） ----------------
 
-STATE_ICON = {"done": "✓ 已测", "registered": "◐ 已登记", "missing": "○ 未测(提示)", "waived": "⊘ 已豁免"}
+STATE_ICON = {"done": "✓ 已测", "registered": "◐ 已登记", "missing": "○ 未测(提示)"}
 
 
 def load_sop_cfg():
@@ -1095,7 +1095,6 @@ def sop_report(c, project):
                   for t in tests}
     pend_rows = [dict(p) for p in c.execute("SELECT * FROM pending_tests WHERE project=?", (project,))]
     pend_terms = [p["term"] for p in pend_rows]
-    waives0 = [dict(w) for w in c.execute("SELECT * FROM waives WHERE project=? AND event_id=0", (project,))]
 
     # 术语 -> 阶段映射（供旧数据 stage 回填）
     term_stage = {}
@@ -1133,21 +1132,17 @@ def sop_report(c, project):
     # 阶段视图：提示菜单（when 触发语义 + check 术语）× 执行（该阶段 test 流水）
     # 状态匹配仅作参考展示（供 AI 自查），不构成门禁——覆盖度由 AI 显式申报、人背书
     stage_view = []
-    total = done = registered = missing = waived = 0
+    total = done = registered = missing = 0
     for s in stages:
         items, executed_ids = [], set()
         for it in menu_map.get(s, []):
             term = it["term"]
             hit_test = next((t for t in tests if _term_in(term, test_texts[t["id"]])), None)
-            hit_waive = next((w for w in waives0
-                              if _term_in(term, w["term"]) or _term_in(w["term"], term)), None)
             if hit_test:
                 items.append({"term": term, "when": it["when"], "state": "done", "ev": "#" + str(hit_test["id"])})
                 executed_ids.add(hit_test["id"])
             elif any(_term_in(term, p) for p in pend_terms):
                 items.append({"term": term, "when": it["when"], "state": "registered", "ev": "pending"})
-            elif hit_waive:
-                items.append({"term": term, "when": it["when"], "state": "waived", "ev": hit_waive["reason"]})
             else:
                 items.append({"term": term, "when": it["when"], "state": "missing", "ev": None})
             st = items[-1]["state"]
@@ -1156,20 +1151,17 @@ def sop_report(c, project):
                 done += 1
             elif st == "registered":
                 registered += 1
-            elif st == "waived":
-                waived += 1
             else:
                 missing += 1
         executed = [t for t in tests if (t["stage"] or "") == s]
         executed += [t for t in tests if not (t["stage"] or "").strip()
                      and t["id"] in executed_ids and t not in executed]
         sdone = sum(1 for i in items if i["state"] == "done")
-        swaiv = sum(1 for i in items if i["state"] == "waived")
         sreg = sum(1 for i in items if i["state"] == "registered")
         stage_view.append({
-            "stage": s, "menu": items, "done": sdone, "waived": swaiv,
+            "stage": s, "menu": items, "done": sdone,
             "total": len(items),
-            "complete": bool(items) and sdone + swaiv == len(items),
+            "complete": bool(items) and sdone == len(items),
             "executed": [{"id": t["id"], "value": t["value"], "note": t["note"], "status": t["status"],
                           "parent_ext": t["parent_ext"], "source": t["source"],
                           "created_at": t["created_at"]} for t in executed],
@@ -1188,7 +1180,7 @@ def sop_report(c, project):
              "index": cur, "total": len(stages), "flags": dict(zip(stages, flags))}
     return {"stage": stage, "stages_all": stages_all, "stages_enabled": stages,
             "stage_view": stage_view, "total": total, "done": done,
-            "registered": registered, "missing": missing, "waived": waived}
+            "registered": registered, "missing": missing}
 
 def cmd_sop(a):
     c = connect()
@@ -1197,145 +1189,16 @@ def cmd_sop(a):
     print("== SOP hints: %s ==" % a.project)
     print("当前阶段: %s (%d/%d)" % (rep["stage"]["current"], rep["stage"]["index"], rep["stage"]["total"]))
     cov = rep["done"] * 100 // rep["total"] if rep["total"] else 100
-    print("参考覆盖: 提示项 %d | 已测 %d | 已登记 %d | 已豁免 %d | 未测 %d | 参考完成率 %d%%"
-          % (rep["total"], rep["done"], rep["registered"], rep["waived"], rep["missing"], cov))
+    print("参考覆盖: 提示项 %d | 已测 %d | 已登记 %d | 未测 %d | 参考完成率 %d%%"
+          % (rep["total"], rep["done"], rep["registered"], rep["missing"], cov))
     print("-- 按语义判断 when 是否命中当前目标面，命中才对照 check 查漏；未命中/不适用可跳过（提示层，非门禁）--")
     for v in rep["stage_view"]:
         mark = "✓" if v["complete"] else " "
-        print("%s %-6s 参考 %d/%d  执行流水 %d 条" % (mark, v["stage"], v["done"] + v["waived"],
+        print("%s %-6s 参考 %d/%d  执行流水 %d 条" % (mark, v["stage"], v["done"],
                                                     v["total"], len(v["executed"])))
         for it in v["menu"]:
             ctx = "（%s）" % it["when"] if it["state"] == "missing" and it["when"] else ""
-            tail = "" if it["state"] in ("done", "waived") else "  ← " + str(it["ev"] or "按需登记 pending")
-            print("      %-12s %-14s %s%s" % (STATE_ICON[it["state"]], it["term"], ctx, tail))
-
-
-def sop_report(c, project):
-    cfg = load_sop_cfg()
-    prow = c.execute("SELECT stages_enabled FROM projects WHERE name=?", (project,)).fetchone()
-    enabled = [s.strip() for s in (prow["stages_enabled"] or "").split(",") if s.strip()]
-    stages_all = cfg.get("stages", [])
-    stages = [s for s in stages_all if not enabled or s in enabled]
-    menu_map = _hints_menu(cfg)
-
-    tests = [dict(r) for r in c.execute(
-        "SELECT * FROM raw_events WHERE project=? AND kind='test'", (project,))]
-    test_texts = {t["id"]: (t["value"] or "") + " " + (t["note"] or "") + " " + (t["source"] or "")
-                  for t in tests}
-    pend_rows = [dict(p) for p in c.execute("SELECT * FROM pending_tests WHERE project=?", (project,))]
-    pend_terms = [p["term"] for p in pend_rows]
-    waives0 = [dict(w) for w in c.execute("SELECT * FROM waives WHERE project=? AND event_id=0", (project,))]
-
-    # 术语 -> 阶段映射（供旧数据 stage 回填）
-    term_stage = {}
-    for stage, items in menu_map.items():
-        for it in items:
-            term_stage.setdefault(it["term"], stage)
-
-    def _stage_for_term(term):
-        if term in term_stage:
-            return term_stage[term]
-        for mt, s2 in term_stage.items():
-            if _term_in(mt, term) or _term_in(term, mt):
-                return s2
-        return ""
-
-    # 幂等回填：旧数据（pending_tests / test 事件）缺 stage 的按术语反查补上
-    dirty = 0
-    for p in pend_rows:
-        if not (p["stage"] or "").strip():
-            st = _stage_for_term(p["term"])
-            if st:
-                c.execute("UPDATE pending_tests SET stage=? WHERE id=?", (st, p["id"]))
-                dirty += 1
-    for t in tests:
-        if not (t["stage"] or "").strip():
-            st = _stage_for_term(test_texts[t["id"]])
-            if st:
-                c.execute("UPDATE raw_events SET stage=? WHERE id=?", (st, t["id"]))
-                t["stage"] = st
-                dirty += 1
-    if dirty:
-        log_change(c, project, "stage-backfill", f"术语反查回填 stage {dirty} 条")
-        c.commit()
-
-    # 阶段视图：提示菜单（when 触发语义 + check 术语）× 执行（该阶段 test 流水）
-    # 状态匹配仅作参考展示（供 AI 自查），不构成门禁——覆盖度由 AI 显式申报、人背书
-    stage_view = []
-    total = done = registered = missing = waived = 0
-    for s in stages:
-        items, executed_ids = [], set()
-        for it in menu_map.get(s, []):
-            term = it["term"]
-            hit_test = next((t for t in tests if _term_in(term, test_texts[t["id"]])), None)
-            hit_waive = next((w for w in waives0
-                              if _term_in(term, w["term"]) or _term_in(w["term"], term)), None)
-            if hit_test:
-                items.append({"term": term, "when": it["when"], "state": "done", "ev": "#" + str(hit_test["id"])})
-                executed_ids.add(hit_test["id"])
-            elif any(_term_in(term, p) for p in pend_terms):
-                items.append({"term": term, "when": it["when"], "state": "registered", "ev": "pending"})
-            elif hit_waive:
-                items.append({"term": term, "when": it["when"], "state": "waived", "ev": hit_waive["reason"]})
-            else:
-                items.append({"term": term, "when": it["when"], "state": "missing", "ev": None})
-            st = items[-1]["state"]
-            total += 1
-            if st == "done":
-                done += 1
-            elif st == "registered":
-                registered += 1
-            elif st == "waived":
-                waived += 1
-            else:
-                missing += 1
-        executed = [t for t in tests if (t["stage"] or "") == s]
-        executed += [t for t in tests if not (t["stage"] or "").strip()
-                     and t["id"] in executed_ids and t not in executed]
-        sdone = sum(1 for i in items if i["state"] == "done")
-        swaiv = sum(1 for i in items if i["state"] == "waived")
-        sreg = sum(1 for i in items if i["state"] == "registered")
-        stage_view.append({
-            "stage": s, "menu": items, "done": sdone, "waived": swaiv,
-            "total": len(items),
-            "complete": bool(items) and sdone + swaiv == len(items),
-            "executed": [{"id": t["id"], "value": t["value"], "note": t["note"], "status": t["status"],
-                          "parent_ext": t["parent_ext"], "source": t["source"],
-                          "created_at": t["created_at"]} for t in executed],
-            "pending": [{"term": p["term"], "at": p["created_at"]}
-                        for p in pend_rows if (p["stage"] or "") == s],
-        })
-
-    # 当前阶段判定：菜单全部 done/waived 视为走完（仅展示参考，不拦截任何动作）
-    flags = [v["complete"] for v in stage_view if v["menu"]]
-    cur = len(stages)
-    for i, ok in enumerate(flags):
-        if not ok:
-            cur = i
-            break
-    stage = {"current": stages[cur] if cur < len(stages) else "(全部完成)",
-             "index": cur, "total": len(stages), "flags": dict(zip(stages, flags))}
-    return {"stage": stage, "stages_all": stages_all, "stages_enabled": stages,
-            "stage_view": stage_view, "total": total, "done": done,
-            "registered": registered, "missing": missing, "waived": waived}
-
-def cmd_sop(a):
-    c = connect()
-    require_project(c, a.project)
-    rep = sop_report(c, a.project)
-    print("== SOP hints: %s ==" % a.project)
-    print("当前阶段: %s (%d/%d)" % (rep["stage"]["current"], rep["stage"]["index"], rep["stage"]["total"]))
-    cov = rep["done"] * 100 // rep["total"] if rep["total"] else 100
-    print("参考覆盖: 提示项 %d | 已测 %d | 已登记 %d | 已豁免 %d | 未测 %d | 参考完成率 %d%%"
-          % (rep["total"], rep["done"], rep["registered"], rep["waived"], rep["missing"], cov))
-    print("-- 按语义判断 when 是否命中当前目标面，命中才对照 check 查漏；未命中/不适用可跳过（提示层，非门禁）--")
-    for v in rep["stage_view"]:
-        mark = "✓" if v["complete"] else " "
-        print("%s %-6s 参考 %d/%d  执行流水 %d 条" % (mark, v["stage"], v["done"] + v["waived"],
-                                                    v["total"], len(v["executed"])))
-        for it in v["menu"]:
-            ctx = "（%s）" % it["when"] if it["state"] == "missing" and it["when"] else ""
-            tail = "" if it["state"] in ("done", "waived") else "  ← " + str(it["ev"] or "按需登记 pending")
+            tail = "" if it["state"] == "done" else "  ← 命中则补测，未命中/不适用跳过并在收尾申报"
             print("      %-12s %-14s %s%s" % (STATE_ICON[it["state"]], it["term"], ctx, tail))
 
 
@@ -1365,12 +1228,11 @@ def cmd_waive(a):
     if not (a.term or "").strip():
         sys.exit("[x] 起草豁免必须写明 --term（豁免条目，如 无抓包待补 / test事件缺parent_ext）")
     if a.id is None:
-        sys.exit("[x] 起草豁免必须指定 --id <事件id>（id=0 表示项目级/阶段必测豁免）；"
+        sys.exit("[x] 起草豁免必须指定 --id <事件id>（报文豁免挂 finding、归因豁免挂 test，豁免只作用于具体事件）；"
                  "确认已有豁免用 --wid N --confirm")
-    if a.id != 0:
-        row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?", (a.id, a.project)).fetchone()
-        if not row:
-            sys.exit(f"[x] 记录不存在: #{a.id}（id=0 表示项目级/阶段提示项豁免）")
+    row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?", (a.id, a.project)).fetchone()
+    if not row:
+        sys.exit(f"[x] 记录不存在: #{a.id}（豁免只作用于具体事件；SOP 提示项非义务，无需豁免）")
     wcur = c.execute("INSERT INTO waives(project,event_id,term,reason,at,confirmed) VALUES(?,?,?,?,?,0)",
                      (a.project, a.id, a.term, a.reason, now()))
     log_change(c, a.project, "waive",
@@ -1729,7 +1591,7 @@ def main():
     sp = sub.add_parser("waive", help="豁免：AI 起草（confirmed=0，不生效），人工 --wid N --confirm 确认后生效")
     sp.add_argument("--project", required=True)
     sp.add_argument("--id", type=int, default=None,
-                    help="起草豁免：目标事件 id（id=0 项目级/阶段提示项豁免）")
+                    help="起草豁免：目标事件 id（报文豁免挂 finding，归因豁免挂 test）")
     sp.add_argument("--wid", type=int, default=0, help="确认豁免：waive 起草时输出的豁免记录 id")
     sp.add_argument("--confirm", action="store_true", help="人工确认豁免生效（人的决定，配合 --wid）")
     sp.add_argument("--term", default="")
