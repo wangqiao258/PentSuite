@@ -16,7 +16,7 @@ AI 落库与聚合、人看面板与审核的渗透测试**单一项目**。三�
 ```
 PentSuite/
 ├─ pentdb/                 套件运行时（内部全部 __file__ 相对寻址，可整体搬移）
-│  ├─ pentdb.py            CLI：init/panel/add/exec/query/review/lint/rebuild-assets/sop/waive/
+│  ├─ pentdb.py            CLI：init/panel/add/exec/lifecycle/query/review/lint/rebuild-assets/sop/waive/
 │  │                       migrate/report/drop/evidence/verify/stages/recon/js/serve
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；七视图全交互联动）
@@ -57,12 +57,13 @@ PentSuite/
 | 重建实体层 | `rebuild-assets --project P`（幂等；add/recon 资产类写入后自动触发，一般无需手跑） |
 | 登记测试 | `add --kind test --value "动作" --note "结论" --parent-ext <id>[,id2] --stage <阶段名> --source "命令" --auto --status confirmed --confidence high`（**--stage 必带**；value=动作、note=结论） |
 | 执行落库单通道 | `exec --project P --parent-ext N --cmd '<完整命令>' [--stage][--action][--note 结论][--timeout S]`——命令输出自动落盘 + test 事件自动入库 + 原始输出自动挂证据（etype=output/file），探测/测试类命令一律走此通道，防"测了没记" |
+| 结论同步 | `lifecycle --project P --id <finding> --code open\|reproduced\|not-reproduced\|fixed\|reopened [--note]`——复测结论机读化（test note 以机读词开头：复现/未复现/已修复/部分修复/仍存在/待复测） |
 | 登记漏洞 | `add --kind finding --req <请求原文|-> --resp <响应原文|-> ...`——**判定漏洞必须带真实 req/resp**，自动挂 evidence（note=request/response）并在面板展示；无抓包须 `waive --term 无抓包待补` 留痕 |
 | 证据 | `evidence --project P --event-id N --path F`（默认复制进套件；`--text` 直存文本；`--event-id 0`=项目级物料）；`evidence-move --id N --event-id M` 改挂归属 |
 | AI 推断 | `add ... --confidence high\|medium\|low`（推断类禁止 confirmed，一律 new 进待审） |
 | 查询 | `query --project P [--kind][--status]` |
 | SOP | `sop --project P [--apply]`；豁免 `waive --project P --id N --term T --reason R` |
-| 门禁 | `lint --project P`（收尾 0 error） |
+| 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单） |
 | 采集 | `recon --project P --domain D [--single][--proxy]`；`js --project P` |

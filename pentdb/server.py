@@ -32,18 +32,8 @@ LIFE_CODES = ("open", "reproduced", "not-reproduced", "fixed", "reopened")
 
 def set_lifecycle(c, project, fid, code, note=""):
     import pentdb
-    row = c.execute("SELECT attrs FROM raw_events WHERE id=?", (fid,)).fetchone()
-    try:
-        attrs = json.loads(row["attrs"] or "{}") if row else {}
-    except (TypeError, ValueError):
-        attrs = {}
-    attrs["lifecycle"] = code
-    attrs["lifecycle_at"] = pentdb.now()
-    c.execute("UPDATE raw_events SET attrs=? WHERE id=?",
-              (json.dumps(attrs, ensure_ascii=False), fid))
-    c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
-              (project, "lifecycle", f"#{fid} → {code}" + (f" ｜ {note}" if note else "") + "（面板）",
-               attrs["lifecycle_at"]))
+    pentdb.set_lifecycle(c, project, fid, code,
+                         note=note or "面板快捷修改", tag="（面板）")
 
 
 class Handler(BaseHTTPRequestHandler):

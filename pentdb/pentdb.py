@@ -632,6 +632,13 @@ def lint_report(c, project):
         "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'request%'", (project,))}
     ev_resp = {r[0] for r in c.execute(
         "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'response%'", (project,))}
+    # 对账①：evidence 登记的文件在磁盘上丢了 = 证据链断裂（report/kb 沉淀会引用不到）
+    for er in c.execute("SELECT id, path FROM evidence WHERE project=?", (project,)):
+        if (er["path"] or "") and not os.path.exists(er["path"]):
+            errors.append(f"证据 #{er['id']} 文件丢失: {er['path']}（证据链断裂，复测时重建或补挂）")
+    # 对账②：test 执行了但零证据输出（跑过没留痕，测了没记的变体；exec 产出天然豁免）
+    ev_any = {r[0] for r in c.execute(
+        "SELECT DISTINCT event_id FROM evidence WHERE project=? AND event_id != 0", (project,))}
     for r in c.execute("SELECT * FROM raw_events WHERE project=?", (project,)):
         rid = r["id"]
         if not (r["source"] or "").strip():
@@ -652,6 +659,13 @@ def lint_report(c, project):
         if (r["kind"] == "test" and not ((r["title"] or "").strip()
                 or (r["detail"] or "").strip() or (r["note"] or "").strip())):
             errors.append(f"#{rid} test 事件 title/detail/note 全空（空壳待审噪音）")
+        if r["kind"] == "test" and rid not in ev_any:
+            warns.append(f"#{rid} test 无任何证据输出（跑过但零留痕——探测/测试命令建议走 exec 单通道，"
+                         f"输出自动随库；手工落库的补 evidence）")
+        if r["kind"] == "test" and (r["note"] or "").strip() \
+                and not (r["note"] or "").strip().startswith(TEST_CONCLUSIONS):
+            warns.append(f"#{rid} test 结论未以机读词开头（{'/'.join(TEST_CONCLUSIONS)}）"
+                         f"——复测时间轴聚合与 lifecycle 同步依赖它")
         if (r["kind"] in ("finding", "osint", "suggestion")
                 and not (r["title"] or "").strip()):
             errors.append(f"#{rid} {r['kind']} 缺 title（待审页无标题不可读）")
@@ -1448,6 +1462,44 @@ def cmd_exec(a):
         sys.stdout.write(shown.encode("gbk", "ignore").decode("gbk", "ignore") + "\n")
 
 
+# ---------------- 漏洞生命周期（CLI/面板共用；存 finding 行 attrs JSON，与 status 人审态分离） ----------------
+
+LIFE_CODES = ("open", "reproduced", "not-reproduced", "fixed", "reopened")
+# test note 机读结论词（复测时间轴聚合与 lifecycle 同步依赖；note 必须以其一开头）
+TEST_CONCLUSIONS = ("复现", "未复现", "已修复", "部分修复", "仍存在", "待复测")
+
+
+def set_lifecycle(c, project, fid, code, note="", tag=""):
+    """生命周期写入核心：attrs JSON + changelog 留痕。tag 用于区分操作来源（面板/CLI）。"""
+    row = c.execute("SELECT attrs FROM raw_events WHERE id=?", (fid,)).fetchone()
+    try:
+        attrs = json.loads(row["attrs"] or "{}") if row else {}
+    except (TypeError, ValueError):
+        attrs = {}
+    attrs["lifecycle"] = code
+    attrs["lifecycle_at"] = now()
+    c.execute("UPDATE raw_events SET attrs=? WHERE id=?",
+              (json.dumps(attrs, ensure_ascii=False), fid))
+    c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
+              (project, "lifecycle",
+               f"#{fid} → {code}" + (f" ｜ {note}" if note else "") + tag, attrs["lifecycle_at"]))
+
+
+def cmd_lifecycle(a):
+    """复测结论同步：把机读结论落到 finding 生命周期（AI 走 CLI 的正式通道，面板同款留痕）。"""
+    c = connect()
+    require_project(c, a.project)
+    row = c.execute("SELECT id, kind FROM raw_events WHERE id=? AND project=?",
+                    (a.id, a.project)).fetchone()
+    if not row:
+        sys.exit(f"[x] 记录不存在: #{a.id}")
+    if row["kind"] != "finding":
+        sys.exit("[x] lifecycle 只对 finding 生效（test 的结论走 note=，复测时间轴按机读词聚合）")
+    set_lifecycle(c, a.project, a.id, a.code, note=a.note, tag="（CLI）")
+    c.commit()
+    print(f"[ok] #{a.id} 生命周期 → {a.code}")
+
+
 def cmd_stages(a):
     """查看/设置本项目启用的 SOP 阶段（空=全部启用）。"""
     c = connect()
@@ -1619,6 +1671,13 @@ def main():
     sp.add_argument("--project", required=True)
     sp.add_argument("--id", type=int, required=True)
     sp.set_defaults(fn=cmd_verify)
+
+    sp = sub.add_parser("lifecycle", help="复测结论同步 finding 生命周期（" + "/".join(LIFE_CODES) + "；AI 的 CLI 正式通道）")
+    sp.add_argument("--project", required=True)
+    sp.add_argument("--id", required=True, type=int, help="finding record id")
+    sp.add_argument("--code", required=True, choices=LIFE_CODES)
+    sp.add_argument("--note", default="", help="结论说明（进 changelog）")
+    sp.set_defaults(fn=cmd_lifecycle)
 
     sp = sub.add_parser("stages")
     sp.add_argument("--project", required=True)
