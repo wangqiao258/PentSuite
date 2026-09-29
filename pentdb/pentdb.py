@@ -1053,7 +1053,7 @@ def cmd_bootstrap(a):
 
 # ---------------- SOP 提示清单（给 AI 的查漏补缺提示层，非门禁） ----------------
 
-STATE_ICON = {"done": "✓ 已测", "registered": "◐ 已登记", "missing": "○ 未测(提示)"}
+STATE_ICON = {"done": "✓ 已测", "missing": "○ 未测(提示)"}
 
 
 def load_sop_cfg():
@@ -1077,39 +1077,32 @@ def _hints_menu(cfg):
 def sop_report(c, project):
     """扁平 SOP 提示对账：when 语义 × check 术语 × 状态参考（AI 自查用；提示层非门禁）。
 
-    状态 = 术语与本项目 test 事件/pending 登记 的关键词命中，仅供 AI 参考；
+    状态 = 术语与本项目 test 事件的关键词命中，仅供 AI 参考；
     真实覆盖度由 AI 显式申报、人背书，不做机器判定，也不写库（纯只读）。"""
     menu = _hints_menu(load_sop_cfg())
     tests = [dict(r) for r in c.execute(
         "SELECT * FROM raw_events WHERE project=? AND kind='test'", (project,))]
     test_texts = {t["id"]: (t["value"] or "") + " " + (t["note"] or "") + " " + (t["source"] or "")
                   for t in tests}
-    pend_terms = [p["term"] for p in c.execute(
-        "SELECT term FROM pending_tests WHERE project=?", (project,))]
 
     hints = []
     for it in menu:
         term = it["term"]
         hit = next((t for t in tests if _term_in(term, test_texts[t["id"]])), None)
-        if hit:
-            st, ev = "done", "#" + str(hit["id"])
-        elif any(_term_in(term, p) for p in pend_terms):
-            st, ev = "registered", "pending"
-        else:
-            st, ev = "missing", None
+        st, ev = ("done", "#" + str(hit["id"])) if hit else ("missing", None)
         hints.append({"term": term, "when": it["when"], "state": st, "ev": ev})
 
     cnt = lambda s: sum(1 for h in hints if h["state"] == s)
     return {"hints": hints, "total": len(hints),
-            "done": cnt("done"), "registered": cnt("registered"), "missing": cnt("missing")}
+            "done": cnt("done"), "missing": cnt("missing")}
 
 def cmd_sop(a):
     c = connect()
     require_project(c, a.project)
     rep = sop_report(c, a.project)
     print("== SOP hints: %s ==" % a.project)
-    print("提示项 %d | 已测 %d | 已登记 %d | 未测 %d（状态为关键词命中参考；真实覆盖由 AI 申报、人背书）"
-          % (rep["total"], rep["done"], rep["registered"], rep["missing"]))
+    print("提示项 %d | 已测 %d | 未测 %d（状态为关键词命中参考；真实覆盖由 AI 申报、人背书）"
+          % (rep["total"], rep["done"], rep["missing"]))
     print("-- 按语义判断 when 是否命中当前目标面，命中才对照 check 查漏；未命中/不适用跳过并在收尾申报（提示层，非门禁）--")
     for it in rep["hints"]:
         ctx = "（%s）" % it["when"] if it["when"] else ""

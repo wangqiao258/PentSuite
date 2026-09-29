@@ -121,14 +121,18 @@ function lastRetest(fid){
 const frow=r=>{
   const t=lastRetest(r.id);
   const tgt=r.value&&r.value!==r.title?r.value:"";
+  const pend=r.status==="new";
   return `<div class="frow2 ${selFinding===r.id?"on":""}" data-fid="${r.id}">`+
     `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">`+
     `<span class="sev-dot sev-${r.severity||"none"}"></span><b>${esc(r.title||r.value)}</b> ${lifeTag(lifeOf(r))}`+
+    (pend?`<span class="tag t-new">待审</span>`:"")+
     `<span style="flex:1"></span><span class="muted">#${r.id}</span></div>`+
     `<div class="muted" style="font-size:12px;margin-top:2px">`+
     (tgt?esc(tgt)+" · ":"")+
     (t?`最近复测：${esc((t.note||t.value||"").slice(0,40))} · `:"")+
-    `${(r.created_at||"").slice(0,10)}</div></div>`;
+    `${(r.created_at||"").slice(0,10)}</div>`+
+    (pend?`<div style="margin-top:4px" onclick="event.stopPropagation()"><button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button></div>`:"")+
+    `</div>`;
 };
 let ASSET_MAP = {};
 function targetHtml(r){
@@ -480,13 +484,24 @@ async function loadReview(){
   const d=await api("pending",{project:PROJECT});
   const items=d.pending||[];
   if(!items.length){$("#review-table").innerHTML="<tr><td colspan=\"7\">队列已清空，全部处理完毕</td></tr>";updBatch();return;}
-  // 成熟 inbox 模式：队列=决策面。同值已有 confirmed 的重复嫌疑剔除出正队列、置底默认折叠；
-  // 展开只渲染判据卡（备注全文+同值历史），报文/证据在详情页唯一渲染，队列跳转过去。
-  const fresh=items.filter(r=>!(r.dup_confirmed>0)), dup=items.filter(r=>r.dup_confirmed>0);
-  const groups={};
-  fresh.forEach(r=>{const k=srcGroup(r.source);(groups[k]=groups[k]||[]).push(r)});
+  // 成熟 inbox 模式：队列=资产决策面（分组批量确认/驳回）。finding/osint 待审不在队列
+  // 重复展示——审核内联在发现页（看报文/判据后行内拍板），这里只放一行跳转横幅。
+  const fin=items.filter(r=>r.kind==="finding"||r.kind==="osint");
+  const ast=items.filter(r=>r.kind!=="finding"&&r.kind!=="osint");
   let html="<thead><tr><th style=\"width:32px\"></th><th style=\"width:56px\">ID</th><th style=\"width:64px\">类型</th>"+
     "<th>值</th><th style=\"width:24%\">备注（点行展开判据卡）</th><th style=\"width:96px\">属性</th><th style=\"width:128px\">操作</th></tr></thead><tbody>";
+  if(fin.length){
+    html+=`<tr style="background:var(--gray-bg)"><td colspan="7"><b>发现 / 情报待审 × ${fin.length}</b> `+
+      `<span class="muted">——不再在此重复展示，去发现页看报文/判据后行内拍板</span> `+
+      `<button class="mini" onclick="gotoFindingsPending()">去发现页处理</button></td></tr>`;
+  }
+  if(!ast.length){
+    html+=`<tr><td colspan="7" class="muted">资产类队列已空${fin.length?"（仅剩发现/情报待审，见上）":"，全部处理完毕"}</td></tr>`;
+    $("#review-table").innerHTML=html+"</tbody>";updBatch();return;
+  }
+  const fresh=ast.filter(r=>!(r.dup_confirmed>0)), dup=ast.filter(r=>r.dup_confirmed>0);
+  const groups={};
+  fresh.forEach(r=>{const k=srcGroup(r.source);(groups[k]=groups[k]||[]).push(r)});
   Object.keys(groups).sort((a,b)=>groups[b].length-groups[a].length).forEach((src,gi)=>{
     const g=groups[src], gname="g"+gi;
     html+=`<tr style="background:var(--gray-bg)"><td colspan="7"><b>${esc(src)}</b> `+
@@ -559,9 +574,11 @@ function rvJudgeHtml(id,note,rel,q){
 }
 function gotoQueueDetail(id){
   const d=document.querySelector(`#review-table tr.rv-detail[data-did="${id}"]`); if(!d)return;
-  const kind=d.dataset.kind||"", q=d.dataset.q||"";
-  if(kind==="finding"||kind==="osint"){selFinding=id;switchTab("findings");loadFindings();}
-  else gotoAssets(kind,"",q);
+  gotoAssets(d.dataset.kind||"","",d.dataset.q||"");
+}
+function gotoFindingsPending(){
+  findStatus="new";$("#f-find-status").value="new";
+  switchTab("findings");loadFindings();
 }
 function tgGroup(g,on){
   document.querySelectorAll(`#review-table input.rv-check[data-g="${g}"]`).forEach(c=>c.checked=on);

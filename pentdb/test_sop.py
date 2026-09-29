@@ -133,11 +133,6 @@ class SopHintsView(unittest.TestCase):
         # 服务识别类测试事实：parent_ext=0（项目级归因）
         add(kind="test", value="服务识别 nmap -sV 1.2.3.4", parent_ext="0",
             note="nmap 服务识别结果", status="confirmed", auto=True, confidence="high")
-        # 旧 pending 登记（legacy：registered 状态参考仍能命中）
-        c = pentdb.connect()
-        c.execute("INSERT INTO pending_tests(project,event_id,term,created_at) VALUES(?,?,?,?)",
-                  (PROJ, 0, "认证与会话", pentdb.now()))
-        c.commit(); c.close()
 
     def _rep(self):
         c = pentdb.connect()
@@ -147,9 +142,9 @@ class SopHintsView(unittest.TestCase):
 
     def test_flat_report_no_stage(self):
         rep = self._rep()
-        self.assertEqual(set(rep), {"hints", "total", "done", "registered", "missing"})
+        self.assertEqual(set(rep), {"hints", "total", "done", "missing"})
         self.assertEqual(rep["total"], len(rep["hints"]))
-        self.assertEqual(rep["done"] + rep["registered"] + rep["missing"], rep["total"])
+        self.assertEqual(rep["done"] + rep["missing"], rep["total"])
 
     def test_menu_state_done_via_text_match(self):
         rep = self._rep()
@@ -157,11 +152,6 @@ class SopHintsView(unittest.TestCase):
         self.assertIn(("服务识别", "done"), pairs)
         done = [i for i in rep["hints"] if i["state"] == "done"]
         self.assertTrue(all(i["ev"].startswith("#") for i in done))
-
-    def test_pending_registered(self):
-        rep = self._rep()
-        pairs = [(i["term"], i["state"]) for i in rep["hints"]]
-        self.assertIn(("认证与会话", "registered"), pairs)
 
     def test_missing_default(self):
         rep = self._rep()
