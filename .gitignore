@@ -3,6 +3,7 @@ data/
 *.db
 *.db-journal
 downloads/
+evidence/
 .venv/
 creds.json
 

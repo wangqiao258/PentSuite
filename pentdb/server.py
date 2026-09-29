@@ -10,6 +10,11 @@ from urllib.parse import urlparse, parse_qs
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "data", "pentdb.db")
 WEB = os.path.join(BASE, "web", "index.html")
+# 静态资源白名单（web/ 目录拆分后：html/css/js 三文件）
+STATIC = {
+    "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
 
 
 def db():
@@ -19,6 +24,26 @@ def db():
 
 def rows_to_dicts(rows):
     return [dict(r) for r in rows]
+
+
+# 漏洞生命周期（与 raw_events.status 人审态分离；存 finding 行 attrs JSON）
+LIFE_CODES = ("open", "reproduced", "not-reproduced", "fixed", "reopened")
+
+
+def set_lifecycle(c, project, fid, code, note=""):
+    import pentdb
+    row = c.execute("SELECT attrs FROM raw_events WHERE id=?", (fid,)).fetchone()
+    try:
+        attrs = json.loads(row["attrs"] or "{}") if row else {}
+    except (TypeError, ValueError):
+        attrs = {}
+    attrs["lifecycle"] = code
+    attrs["lifecycle_at"] = pentdb.now()
+    c.execute("UPDATE raw_events SET attrs=? WHERE id=?",
+              (json.dumps(attrs, ensure_ascii=False), fid))
+    c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
+              (project, "lifecycle", f"#{fid} → {code}" + (f" ｜ {note}" if note else "") + "（面板）",
+               attrs["lifecycle_at"]))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -41,6 +66,16 @@ class Handler(BaseHTTPRequestHandler):
                 body = f.read().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if u.path in STATIC:
+            fname, ctype = STATIC[u.path]
+            with open(os.path.join(BASE, "web", fname), encoding="utf-8") as f:
+                body = f.read().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -69,6 +104,18 @@ class Handler(BaseHTTPRequestHandler):
                 args = [p]
                 if q.get("kind"):
                     sql += " AND kind=?"; args.append(q["kind"][0])
+                if q.get("ids"):  # 按观测 id 列表取（资产实体下钻）
+                    ids = [int(x) for x in q["ids"][0].split(",") if x.strip().isdigit()]
+                    if ids:
+                        sql += " AND id IN (%s)" % ",".join("?" * len(ids))
+                        args += ids
+                if q.get("kinds"):  # 多类型过滤（逗号分隔），资产明细页默认 domain,port,path,param
+                    kinds = [k.strip() for k in q["kinds"][0].split(",") if k.strip()]
+                    if kinds:
+                        sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
+                        args += kinds
+                if q.get("value"):  # 精确按值取（待审队列下钻：同值观测）
+                    sql += " AND value=?"; args.append(q["value"][0])
                 if q.get("status"):
                     sql += " AND status=?"; args.append(q["status"][0])
                 if q.get("q"):
@@ -81,6 +128,84 @@ class Handler(BaseHTTPRequestHandler):
                 for e in events:
                     e["ev_count"] = evc.get(e["id"], 0)
                 self._json({"events": events})
+            elif u.path == "/api/assets":
+                p = q.get("project", [""])[0]
+                if not c.execute("SELECT 1 FROM projects WHERE name=?", (p,)).fetchone():
+                    return self._json({"error": "project not found"}, 404)
+                import pentdb
+                rows = [dict(r) for r in c.execute(
+                    "SELECT * FROM assets WHERE project=? ORDER BY atype, akey", (p,))]
+                ev_status = {r["id"]: r["status"] for r in c.execute(
+                    "SELECT id, status FROM raw_events WHERE project=?", (p,))}
+                atype = q.get("atype", [""])[0]
+                status_f = q.get("status", [""])[0]
+                qry = q.get("q", [""])[0].lower()
+                out = []
+                for r in rows:
+                    eids = json.loads(r["event_ids"] or "[]")
+                    statuses = [ev_status[i] for i in eids if i in ev_status]
+                    review = pentdb.asset_review_state(statuses)
+                    if status_f and review != status_f:
+                        continue
+                    if atype and r["atype"] != atype:
+                        continue
+                    attrs = json.loads(r["attrs"] or "{}")
+                    if qry and qry not in r["akey"].lower() \
+                            and qry not in json.dumps(attrs, ensure_ascii=False).lower():
+                        continue
+                    out.append({
+                        "atype": r["atype"], "akey": r["akey"], "display": r["display"],
+                        "parent_atype": r["parent_atype"], "parent_akey": r["parent_akey"],
+                        "attrs": attrs, "event_ids": eids,
+                        "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+                        "review": review,
+                        "stale": pentdb.asset_is_stale(r["last_seen"]),
+                        "obs": len(eids),
+                    })
+                summary = {}
+                for a in out:
+                    summary[a["atype"]] = summary.get(a["atype"], 0) + 1
+                self._json({"assets": out, "summary": summary})
+            elif u.path == "/api/evidence":
+                p = q.get("project", [""])[0]
+                sql = "SELECT e.*, r.kind AS ev_kind, r.title AS ev_title FROM evidence e " \
+                      "LEFT JOIN raw_events r ON r.id=e.event_id WHERE e.project=?"
+                args = [p]
+                if q.get("event_id"):
+                    sql += " AND e.event_id=?"; args.append(int(q["event_id"][0]))
+                if q.get("event_ids"):
+                    ids = [int(x) for x in q["event_ids"][0].split(",") if x.strip().isdigit()]
+                    if ids:
+                        sql += " AND e.event_id IN (%s)" % ",".join("?" * len(ids))
+                        args += ids
+                rows = []
+                for r in rows_to_dicts(c.execute(sql + " ORDER BY e.id DESC", args)):
+                    r["exists"] = os.path.exists(r["path"])
+                    rows.append(r)
+                self._json({"evidence": rows})
+            elif u.path == "/api/evidence/view":
+                eid = int(q.get("id", ["0"])[0])
+                row = c.execute("SELECT * FROM evidence WHERE id=?", (eid,)).fetchone()
+                if not row:
+                    return self._json({"error": "no evidence"}, 404)
+                path = row["path"]
+                if not os.path.exists(path):
+                    return self._json({"error": "file missing", "path": path}, 404)
+                with open(path, "rb") as f:
+                    raw = f.read(262144)
+                content, binary = "", False
+                for enc in ("utf-8", "gbk"):
+                    try:
+                        content = raw.decode(enc)
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        if enc == "gbk":
+                            binary = True
+                if b"\x00" in raw:
+                    binary = True
+                self._json({"id": eid, "name": os.path.basename(path), "path": path,
+                            "note": row["note"], "sha256": row["sha256"],
+                            "binary": binary, "content": "" if binary else content})
             elif u.path == "/api/timeline":
                 p = q.get("project", [""])[0]
                 events = rows_to_dicts(c.execute(
@@ -161,6 +286,76 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/api/evidence/download":
+            eid = int(q.get("id", ["0"])[0])
+            row = c.execute("SELECT * FROM evidence WHERE id=?", (eid,)).fetchone()
+            if not row or not os.path.exists(row["path"]):
+                return self._json({"error": "no evidence file"}, 404)
+            with open(row["path"], "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition",
+                             f"attachment; filename={os.path.basename(row['path'])}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if u.path == "/api/retest":
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            import argparse
+            import pentdb
+            fid = data.get("finding_id")
+            action = (data.get("action") or "").strip()
+            conclusion = (data.get("conclusion") or "").strip()
+            source = (data.get("source") or "面板手工复测").strip()
+            stage = (data.get("stage") or "").strip()
+            lifecycle = (data.get("lifecycle") or "").strip()
+            if not fid or (not action and not lifecycle):
+                return self._json({"error": "finding_id 必填，action/lifecycle 至少一项"}, 400)
+            if lifecycle and lifecycle not in LIFE_CODES:
+                return self._json({"error": "lifecycle 必须是 " + "/".join(LIFE_CODES)}, 400)
+            c0 = db()
+            try:
+                row = c0.execute(
+                    "SELECT project, parent_ext FROM raw_events WHERE id=? AND kind='finding'",
+                    (fid,)).fetchone()
+                if not row:
+                    return self._json({"error": "finding not found"}, 404)
+                if lifecycle:
+                    set_lifecycle(c0, row["project"], fid, lifecycle, note=conclusion or "面板快捷修改")
+                    c0.commit()
+            finally:
+                c0.close()
+            if not action:
+                return self._json({"ok": True, "lifecycle": lifecycle, "id": None})
+            all_stages = pentdb.load_sop_cfg().get("stages", [])
+            if all_stages and stage not in all_stages:
+                stage = stage or (all_stages[0])
+                for cand in all_stages:
+                    if "利用" in cand or "验证" in cand:
+                        stage = cand
+                        break
+            parents = ",".join([str(fid)] + [x.strip() for x in (row["parent_ext"] or "").split(",")
+                                             if x.strip().isdigit()])
+            ns = argparse.Namespace(
+                project=row["project"], ext_id="", kind="test", value=action,
+                title="复测: " + action[:60], detail="", note=conclusion, source=source,
+                parent_ext=parents, merge_key="", status="confirmed", confidence="",
+                severity="", code="", tech="", service="", scope="in",
+                auto=True, update=False, origin="human", stage=stage)
+            try:
+                pentdb.cmd_add(ns)
+            except SystemExit as e:
+                return self._json({"error": str(e)}, 400)
+            c2 = db()
+            try:
+                r2 = c2.execute("SELECT id FROM raw_events WHERE project=? AND kind='test' "
+                                "ORDER BY id DESC LIMIT 1", (row["project"],)).fetchone()
+                return self._json({"ok": True, "id": r2["id"] if r2 else None, "stage": stage})
+            finally:
+                c2.close()
         if u.path == "/api/manual-add":
             n = int(self.headers.get("Content-Length", 0))
             data = json.loads(self.rfile.read(n).decode("utf-8"))
@@ -177,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
                 title="", detail="", note=data.get("note", ""), source=source,
                 parent_ext="", merge_key="", status="confirmed", confidence="",
                 severity=severity, code="", tech="", service="", scope=scope,
-                auto=False, update=bool(data.get("update")), origin="human")
+                auto=False, update=bool(data.get("update")), origin="human", stage="")
             try:
                 pentdb.cmd_add(ns)
             except SystemExit as e:

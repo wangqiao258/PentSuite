@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """PentDB — AI 渗透信息收集库（事实层，写库唯一入口）。
 
-数据模型（三张表）:
-  raw_events  append-only 原始事件（AI/迁移/人写入，禁止 UPDATE 内容字段）
+数据模型:
+  raw_events  append-only 原始观测流（AI/迁移/人写入，禁止 UPDATE 内容字段）
+  assets      资产实体层（纯派生表：观测按规范 akey 归并，rebuild-assets 幂等重建）
   reviews     人审流水（确认/驳回，只追加）
   changelog   全部写操作留痕（只追加）
 
@@ -17,6 +18,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -31,6 +33,9 @@ VALID_ORIGIN = ("agent", "human", "migrate")
 VALID_SEVERITY = ("crit", "high", "med", "low", "info")
 VALID_SCOPE = ("in", "out", "unknown")
 FACT_KINDS = ("domain", "port", "path", "param", "test")  # 机器可验证事实：允许 --auto 自动确认
+ASSET_KINDS = ("domain", "port", "path", "param")         # 资产类观测：参与实体归并
+VALID_ATYPES = ("domain", "host", "service", "endpoint")
+STALE_DAYS = 30  # 资产生命周期：last_seen 超过 N 天视为 stale
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -60,6 +65,7 @@ CREATE TABLE IF NOT EXISTS raw_events (
   source     TEXT NOT NULL,
   origin     TEXT NOT NULL DEFAULT 'agent',
   stage      TEXT DEFAULT '',
+  attrs      TEXT DEFAULT '{}',          -- JSON 元数据（lifecycle 等面板侧状态；不动观测正文）
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS evidence (
@@ -69,6 +75,7 @@ CREATE TABLE IF NOT EXISTS evidence (
   path       TEXT NOT NULL,
   sha256     TEXT DEFAULT '',
   note       TEXT DEFAULT '',
+  etype      TEXT DEFAULT '',              -- 证据类型：request/response/file（面板按类型渲染报文）
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pending_tests (
@@ -104,6 +111,21 @@ CREATE TABLE IF NOT EXISTS changelog (
 );
 CREATE INDEX IF NOT EXISTS idx_events_project ON raw_events(project);
 CREATE INDEX IF NOT EXISTS idx_events_status  ON raw_events(project, status);
+
+-- 资产实体层（纯派生表：由 raw_events 的资产类观测归并而来，rebuild-assets 幂等重建）
+CREATE TABLE IF NOT EXISTS assets (
+  project     TEXT NOT NULL,
+  atype       TEXT NOT NULL,             -- domain / host / service / endpoint
+  akey        TEXT NOT NULL,             -- 规范身份 key（归并去重的唯一依据）
+  display     TEXT DEFAULT '',
+  parent_atype TEXT DEFAULT '',          -- 统一父引用（替代 parent_ext 的 id/value 混用）
+  parent_akey TEXT DEFAULT '',
+  attrs       TEXT DEFAULT '{}',         -- JSON：端口/技术栈/服务/参数/状态码等聚合属性
+  event_ids   TEXT DEFAULT '[]',         -- JSON：支撑本实体的观测 id（溯源/人审聚合）
+  first_seen  TEXT DEFAULT '',
+  last_seen   TEXT DEFAULT '',
+  PRIMARY KEY (project, atype, akey)
+);
 """
 
 
@@ -139,6 +161,23 @@ def connect():
         pass
     try:
         c.execute("ALTER TABLE pending_tests ADD COLUMN stage TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE raw_events ADD COLUMN updated_at TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE raw_events ADD COLUMN attrs TEXT DEFAULT '{}'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE evidence ADD COLUMN etype TEXT DEFAULT ''")
+        # 仅在首次加列时做存量回填（request/response/file），随即 commit 释放写锁
+        c.execute("UPDATE evidence SET etype='request' WHERE note LIKE 'request%'")
+        c.execute("UPDATE evidence SET etype='response' WHERE note LIKE 'response%'")
+        c.execute("UPDATE evidence SET etype='file' WHERE etype IS NULL OR etype=''")
+        c.commit()
     except sqlite3.OperationalError:
         pass
     return c
@@ -223,6 +262,17 @@ def cmd_init(a):
 
 
 def cmd_add(a):
+    if getattr(a, "detail_file", ""):
+        with open(a.detail_file, encoding="utf-8") as f:
+            a.detail = f.read()
+    req_val = getattr(a, "req", "") or ""
+    resp_val = getattr(a, "resp", "") or ""
+    req_text = sys.stdin.read() if req_val == "-" else None
+    resp_text = sys.stdin.read() if resp_val == "-" else None
+    if req_val and req_val != "-" and not os.path.exists(req_val):
+        sys.exit(f"[x] --req 文件不存在: {req_val}")
+    if resp_val and resp_val != "-" and not os.path.exists(resp_val):
+        sys.exit(f"[x] --resp 文件不存在: {resp_val}")
     if a.kind not in VALID_KINDS:
         sys.exit(f"[x] kind 必须是 {'/'.join(VALID_KINDS)}")
     if not a.source:
@@ -244,8 +294,20 @@ def cmd_add(a):
         sys.exit(f"[x] scope 必须是 {'/'.join(VALID_SCOPE)}")
     if (a.stage or "") and a.stage not in load_sop_cfg().get("stages", []):
         sys.exit(f"[x] stage 必须是 SOP 定义的阶段之一: {'/'.join(load_sop_cfg().get('stages', []))}")
+    # test 是过程记录不是空壳：必须带 title/detail/note 至少一项，否则待审页全是空白噪音
+    if a.kind == "test" and not ((a.title or "").strip() or (a.detail or "").strip() or (a.note or "").strip()):
+        sys.exit("[x] test 事件必须带 --title 或 --detail 或 --note（过程描述），"
+                 "纯脚本执行痕迹请勿入库——待审页只收可读记录")
     c = connect()
     require_project(c, a.project)
+    # test 幂等：同 project+source+title+detail 指纹相同视为重复执行（如脚本双跑），拒绝入库
+    if a.kind == "test":
+        dup_t = c.execute(
+            "SELECT id FROM raw_events WHERE project=? AND kind='test' AND source=? "
+            "AND title=? AND detail=? ORDER BY id LIMIT 1",
+            (a.project, a.source, a.title or "", a.detail or "")).fetchone()
+        if dup_t:
+            sys.exit(f"[x] 重复 test 事件：与 #{dup_t['id']} 来源与内容完全相同（脚本重复执行？），拒绝入库")
     if a.kind != "test":  # test 是事件流允许重复；事实类重复时：拒绝或按 --update 重扫语义更新
         dup = c.execute("SELECT * FROM raw_events WHERE project=? AND kind=? AND value=? ORDER BY id LIMIT 1",
                         (a.project, a.kind, a.value)).fetchone()
@@ -256,34 +318,246 @@ def cmd_add(a):
             changes = []
             if (a.note or "") != (dup["note"] or ""):
                 changes.append(f"note {dup['note']!r} -> {a.note!r}")
+            if a.detail is not None and a.detail != (dup["detail"] or ""):
+                changes.append("detail 复测物料增补")
             if str(a.code or "") != (dup["code"] or ""):
                 changes.append(f"code {dup['code']} -> {a.code}")
             if (a.tech or "") != (dup["tech"] or ""):
                 changes.append(f"tech {dup['tech']} -> {a.tech}")
             if (a.service or "") != (dup["service"] or ""):
                 changes.append(f"service {dup['service']} -> {a.service}")
-            c.execute("UPDATE raw_events SET note=?, code=?, tech=?, service=?, source=?, verified_at=? "
-                      "WHERE id=?",
-                      (a.note or "", str(a.code or ""), a.tech or "", a.service or "",
-                       a.source, now(), dup["id"]))
+            if (a.title or "") and a.title != (dup["title"] or ""):
+                changes.append(f"title {dup['title']!r} -> {a.title!r}")
+            c.execute("UPDATE raw_events SET note=?, detail=?, code=?, tech=?, service=?, title=?, source=?, "
+                      "verified_at=?, updated_at=? WHERE id=?",
+                      (a.note or "", a.detail if a.detail is not None else dup["detail"],
+                       str(a.code or ""), a.tech or "", a.service or "",
+                       a.title if (a.title or "") else (dup["title"] or ""),
+                       a.source, now(), now(), dup["id"]))
             summary = "; ".join(changes) if changes else "观测未变，仅刷新验证时间与来源"
             log_change(c, a.project, "rescan-update", f"#{dup['id']} {a.kind}:{a.value[:50]} | {summary}")
             c.commit()
+            if a.kind in ASSET_KINDS:
+                rebuild_assets(c, a.project)
+                c.commit()
             print(f"[ok] 重扫更新 #{dup['id']} ({a.kind}: {a.value[:50]}) ｜ {summary}")
             return
     merge_key = a.merge_key or (a.value if a.kind == "domain" else "")
     verified = now() if status == "confirmed" else ""
+    ts = now()
     cur = c.execute(
         "INSERT INTO raw_events(project,ext_id,kind,value,title,detail,note,parent_ext,"
-        "merge_key,status,confidence,severity,code,tech,service,scope,verified_at,source,origin,stage,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "merge_key,status,confidence,severity,code,tech,service,scope,verified_at,source,origin,stage,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (a.project, a.ext_id, a.kind, a.value, a.title or "", a.detail or "",
          a.note or "", a.parent_ext or "", merge_key, status, a.confidence or "",
          a.severity or "", str(a.code or ""), a.tech or "", a.service or "",
-         a.scope, verified, a.source, a.origin, a.stage or "", now()))
+         a.scope, verified, a.source, a.origin, a.stage or "", ts, ts))
     log_change(c, a.project, "add", f"#{cur.lastrowid} {a.kind}:{a.value[:60]}")
     c.commit()
+    if a.kind == "finding" and (req_val or resp_val):
+        ev_ids = []
+        if req_val:
+            ev_ids.append(attach_evidence(c, a.project, cur.lastrowid,
+                                          path="" if req_text is not None else req_val,
+                                          text=req_text, note="request"))
+        if resp_val:
+            ev_ids.append(attach_evidence(c, a.project, cur.lastrowid,
+                                          path="" if resp_text is not None else resp_val,
+                                          text=resp_text, note="response"))
+        c.commit()
+        print(f"[ok] 请求/响应证据已挂 #{cur.lastrowid}（evidence {'/'.join(map(str, ev_ids))}）")
+    if a.kind in ASSET_KINDS:
+        rebuild_assets(c, a.project)
+        c.commit()
     print(f"[ok] 事件 #{cur.lastrowid} 已入库 ({a.kind}: {a.value[:60]}) status={status}")
+
+
+# ---------------- 资产实体层（观测流之上的归并层：成熟 ASM 通用三层之一） ----------------
+# raw_events = append-only 观测流（保持不动）；assets = 按 akey 归并的稳定实体（纯派生，可随时重建）。
+# 归并规则：
+#   domain   akey=小写 FQDN 去尾点              parent=注册域
+#   host     akey=ip/主机名（从 port 观测提取）  parent=无
+#   service  akey=host:port                     parent=host
+#   endpoint akey=host+path（param 并入 attrs.params，不再单独成行） parent=host
+
+def _norm_domain(value):
+    """规范化域名 -> (akey, 注册域)；非法输入返回 (None, None)。"""
+    d = (value or "").strip().lower().rstrip(".")
+    if not d or " " in d or "/" in d:
+        return None, None
+    labels = d.split(".")
+    if len(labels) < 2 or not all(labels):
+        return None, None
+    base = ".".join(labels[-2:])
+    if len(labels) >= 3 and len(labels[-2]) <= 3:  # co.uk / com.cn 类二级后缀
+        base = ".".join(labels[-3:])
+    return d, base
+
+
+def _split_hostport(value):
+    """'ip:port' -> (host, port)；无端口/非法端口整体视作 host。"""
+    v = (value or "").strip().lower()
+    if ":" not in v:
+        return v, ""
+    host, _, port = v.rpartition(":")
+    if not host or not port.isdigit():
+        return v, ""
+    return host, port
+
+
+def _resolve_host(parent_ext, by_id, path_host, seen=None):
+    """把观测的 parent_ext 统一解析成主机 akey（终结 id/value/path 三种历史语义混用）。"""
+    pe = (parent_ext or "").strip()
+    if not pe:
+        return ""
+    seen = seen if seen is not None else set()
+    for p in [x.strip() for x in pe.split(",") if x.strip()]:
+        if p.isdigit():  # 旧数据：引用事件 id
+            r = by_id.get(int(p))
+            if not r:
+                continue
+            if r["kind"] == "port":
+                return _split_hostport(r["value"])[0]
+            return (r["value"] or "").strip().lower()
+        if p.startswith("/"):  # 旧数据：引用 path 值（param -> path -> host 两跳）
+            if p in seen:
+                continue
+            seen.add(p)
+            pid = path_host.get(p)
+            if pid is not None:
+                r = by_id.get(pid)
+                if r:
+                    return _resolve_host(r["parent_ext"], by_id, path_host, seen)
+            continue
+        if "/" in p:  # 'host/path' 混合写法：取 host 段
+            return p.split("/", 1)[0]
+        return p.lower()  # 直接就是 host
+    return ""
+
+
+def rebuild_assets(c, project):
+    """从资产类观测全量重建 assets 实体层。幂等、只派生、不触碰 raw_events。返回分类型计数。"""
+    rows = [dict(r) for r in c.execute(
+        "SELECT * FROM raw_events WHERE project=? AND kind IN (%s) ORDER BY id"
+        % ",".join("?" * len(ASSET_KINDS)), (project,) + ASSET_KINDS)]
+    by_id = {r["id"]: r for r in rows}
+    path_host = {}
+    for r in rows:
+        if r["kind"] == "path" and r["value"] not in path_host:
+            path_host[r["value"]] = r["id"]
+
+    ent = {}
+
+    def put(atype, akey, display, patype, pkey, ev):
+        e = ent.setdefault((atype, akey), {
+            "atype": atype, "akey": akey, "display": "",
+            "parent_atype": "", "parent_akey": "",
+            "attrs": {}, "event_ids": [],
+            "first": ev["created_at"], "last": ev["updated_at"] or ev["created_at"]})
+        if display and (not e["display"] or len(display) < len(e["display"])):
+            e["display"] = display
+        if patype and not e["parent_atype"]:
+            e["parent_atype"], e["parent_akey"] = patype, pkey
+        e["event_ids"].append(ev["id"])
+        e["first"] = min(e["first"], ev["created_at"])
+        e["last"] = max(e["last"], ev["updated_at"] or ev["created_at"])
+        mul(e, "scopes", ev["scope"])
+        return e
+
+    def mul(e, key, val):
+        val = str(val or "").strip()
+        if val and val not in e["attrs"].setdefault(key, []):
+            e["attrs"][key].append(val)
+
+    for r in rows:
+        val = (r["value"] or "").strip()
+        if r["kind"] == "domain":
+            akey, base = _norm_domain(val)
+            if not akey:
+                continue
+            labels = akey.split(".")
+            if len(labels) == 4 and all(x.isdigit() for x in labels):  # IP 误录为 domain：按主机归并
+                e = put("host", akey, akey, "", "", r)
+                mul(e, "techs", r["tech"]); mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
+                continue
+            e = put("domain", akey, akey, "domain", base, r)
+            mul(e, "techs", r["tech"]); mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
+        elif r["kind"] == "port":
+            host, port = _split_hostport(val)
+            if not host:
+                continue
+            he = put("host", host, host, "", "", r)
+            if port:
+                mul(he, "ports", port)
+                se = put("service", f"{host}:{port}", f"{host}:{port}", "host", host, r)
+                mul(se, "services", r["service"]); mul(se, "techs", r["tech"]); mul(se, "codes", r["code"])
+            else:
+                mul(he, "techs", r["tech"]); mul(he, "codes", r["code"])
+        elif r["kind"] == "path":
+            host = _resolve_host(r["parent_ext"], by_id, path_host)
+            p = val if val.startswith("/") else "/" + val
+            akey = (host + p) if host else ("?" + p)
+            e = put("endpoint", akey, akey, "host", host, r)
+            mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
+        elif r["kind"] == "param":
+            host = _resolve_host(r["parent_ext"], by_id, path_host)
+            # param 归属于它所属的 endpoint：从 parent_ext 提取全部路径段，逐一并入
+            paths = re.findall(r"/[^\s,]*", r["parent_ext"] or "")
+            paths = [p for p in paths if len(p) > 1] or [""]
+            for p in paths:
+                akey = ((host + p) if host else ("?" + p)) if p else ("?" + val)
+                e = put("endpoint", akey, akey, "host", host, r)
+                mul(e, "params", val); mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
+
+    c.execute("DELETE FROM assets WHERE project=?", (project,))
+    for (atype, akey), e in ent.items():
+        c.execute(
+            "INSERT INTO assets(project,atype,akey,display,parent_atype,parent_akey,"
+            "attrs,event_ids,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (project, atype, akey, e["display"], e["parent_atype"], e["parent_akey"],
+             json.dumps(e["attrs"], ensure_ascii=False), json.dumps(e["event_ids"]),
+             e["first"], e["last"]))
+    counts = {}
+    for (atype, _), _e in ent.items():
+        counts[atype] = counts.get(atype, 0) + 1
+    return counts
+
+
+def asset_review_state(statuses):
+    """实体级人审聚合：任一待审=pending；否则任一 confirmed=confirmed；全驳回=rejected。"""
+    s = set(statuses)
+    if not s:
+        return "pending"
+    if "new" in s:
+        return "pending"
+    return "confirmed" if "confirmed" in s else "rejected"
+
+
+def asset_is_stale(last_seen, days=STALE_DAYS):
+    """生命周期：last_seen 距今超过 N 天视为 stale（域名下线/资产过期不再永远 confirmed）。"""
+    s = (last_seen or "")[:19]
+    if not s:
+        return True
+    try:
+        last = datetime.datetime.fromisoformat(s)
+        if last.tzinfo is None:
+            last = last.astimezone()
+        return (datetime.datetime.now().astimezone() - last).days >= days
+    except ValueError:
+        return True
+
+
+def cmd_rebuild_assets(a):
+    c = connect()
+    require_project(c, a.project)
+    counts = rebuild_assets(c, a.project)
+    log_change(c, a.project, "rebuild-assets",
+               " | ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "0")
+    c.commit()
+    total = sum(counts.values())
+    detail = " ｜ ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "空"
+    print(f"[ok] 实体层已重建: {a.project} ｜ {detail} ｜ 共 {total}")
 
 
 def cmd_query(a):
@@ -346,6 +620,18 @@ def cmd_review(a):
 def lint_report(c, project):
     """lint 扫描（面板/CLI 共用），返回 errors/warns 列表。"""
     errors, warns = [], []
+    # test 事件缺 parent_ext 无补录通道（test 是事件流，--update 不适用），
+    # 允许用 waive(event_id=该事件, term 含 parent_ext) 留痕豁免；豁免清单收尾提交用户裁决。
+    waived_pe = {w["event_id"] for w in c.execute(
+        "SELECT event_id,term FROM waives WHERE project=?", (project,))
+        if "parent_ext" in (w["term"] or "")}
+    waived_capture = {w["event_id"] for w in c.execute(
+        "SELECT event_id,term FROM waives WHERE project=?", (project,))
+        if "抓包" in (w["term"] or "")}
+    ev_req = {r[0] for r in c.execute(
+        "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'request%'", (project,))}
+    ev_resp = {r[0] for r in c.execute(
+        "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'response%'", (project,))}
     for r in c.execute("SELECT * FROM raw_events WHERE project=?", (project,)):
         rid = r["id"]
         if not (r["source"] or "").strip():
@@ -360,8 +646,28 @@ def lint_report(c, project):
             warns.append(f"#{rid} 非法 severity {r['severity']}")
         if (r["scope"] or "unknown") not in VALID_SCOPE:
             errors.append(f"#{rid} 非法 scope {r['scope']}")
-        if r["kind"] == "test" and not (r["parent_ext"] or "").strip():
+        if (r["kind"] == "test" and not (r["parent_ext"] or "").strip()
+                and rid not in waived_pe):
             errors.append(f"#{rid} test 事件缺 parent_ext（测试必须归因到被测记录，多对象用逗号分隔）")
+        if (r["kind"] == "test" and not ((r["title"] or "").strip()
+                or (r["detail"] or "").strip() or (r["note"] or "").strip())):
+            errors.append(f"#{rid} test 事件 title/detail/note 全空（空壳待审噪音）")
+        if (r["kind"] in ("finding", "osint", "suggestion")
+                and not (r["title"] or "").strip()):
+            errors.append(f"#{rid} {r['kind']} 缺 title（待审页无标题不可读）")
+        if r["kind"] == "finding" and (r["detail"] or "") and "【" not in r["detail"]:
+            warns.append(f"#{rid} finding detail 无【节】结构（建议按【描述】/【复测结论】/【修复建议】分节落库）")
+        if r["kind"] == "finding" and (r["detail"] or "") and "【请求】" not in r["detail"] \
+                and "【payload】" not in r["detail"]:
+            warns.append(f"#{rid} finding 缺【请求】/【payload】段（测试用例建议分节落库；"
+                         f"注意【请求】是用例不是事实，事实报文=evidence 的 request/response 对）")
+        if r["kind"] == "finding" and rid not in waived_capture \
+                and (rid not in ev_req or rid not in ev_resp):
+            errors.append(f"#{rid} 漏洞缺请求/响应证据（判定漏洞时必须把真实 req/resp 落库："
+                          f"add --kind finding --req <文件|-> --resp <文件|->；"
+                          f"初测报文已丢的可 waive --term 无抓包待补 留痕豁免）")
+        if r["kind"] == "finding" and not (r["parent_ext"] or "").strip():
+            warns.append(f"#{rid} finding 缺 parent_ext（应归因到被测资产 record id，目标上下文断裂）")
     return {"errors": errors, "warns": warns}
 
 
@@ -404,12 +710,12 @@ def cmd_migrate(a):
                 value = o.get("value") or o.get("title") or ""
                 c.execute(
                     "INSERT INTO raw_events(project,ext_id,kind,value,title,detail,note,"
-                    "parent_ext,merge_key,status,confidence,source,origin,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "parent_ext,merge_key,status,confidence,source,origin,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (a.project, o.get("id"), kind, value, o.get("title", ""),
                      o.get("detail", ""), o.get("note", ""), o.get("parent", ""),
                      value if kind == "domain" else "", status, "", src,
-                     "migrate", o.get("time") or now()))
+                     "migrate", o.get("time") or now(), o.get("time") or now()))
                 n += 1
         log_change(c, a.project, "migrate", f"{fn}: {n} 条")
         print(f"[ok] {fn} -> {kind}: {n} 条")
@@ -418,11 +724,11 @@ def cmd_migrate(a):
     print(f"-- 迁移完成，共 {total} 条")
 
 
-FINDING_MARKS = ("【描述】", "【原因】", "【手工验证】", "【修复】")
+FINDING_MARKS = ("【描述】", "【请求】", "【payload】", "【判据】", "【原因】", "【手工验证】", "【修复】")
 
 
 def _parse_finding_detail(detail):
-    out = {"描述": [], "原因": [], "手工验证": [], "修复": []}
+    out = {"描述": [], "请求": [], "payload": [], "判据": [], "原因": [], "手工验证": [], "修复": []}
     cur = "描述"
     for line in (detail or "").splitlines():
         s = line.strip()
@@ -465,13 +771,19 @@ def _pentest_report(c, project):
         sev = r["severity"] or "未定级"
         out += ["", f"### 3.{i} {r['title'] or r['value']}（{sev}）",
                 f"- 记录: #{r['id']} ｜ 来源: {r['source']}", "",
-                f"**描述**: {sec['描述'] or r['value']}", "",
-                f"**原因分析**: {sec['原因'] or '（待补充：漏洞产生的根因）'}", "",
+                f"**描述**: {sec['描述'] or r['value']}", ""]
+        if sec["请求"] or sec["payload"]:  # 复现包：可直接复制重放
+            out += ["**复现包**:", "", "```",
+                    (sec["请求"] or "") + (("\n\npayload: " + sec["payload"]) if sec["payload"] else ""),
+                    "```", ""]
+        out += [f"**原因分析**: {sec['原因'] or '（待补充：漏洞产生的根因）'}", "",
                 "**手工验证步骤**:"]
         if sec["手工验证"]:
             out.append(sec["手工验证"])
         else:
             out.append(VERIFY_FRAME)
+        if sec["判据"]:
+            out += ["", f"**复现判据**: {sec['判据']}"]
         out += ["", f"**修复建议**: {sec['修复'] or '（待补充：针对根因的修复方案）'}"]
         evs = c.execute("SELECT path, sha256 FROM evidence WHERE event_id=?", (r["id"],)).fetchall()
         if evs:
@@ -970,26 +1282,91 @@ def cmd_waive(a):
     print(f"[ok] #{a.id} 豁免 {a.term} ← {a.reason}")
 
 
-def cmd_evidence(a):
-    """证据指针入库：文件留在原处，库内存路径+SHA256，与记录强关联。"""
-    if not os.path.exists(a.path):
-        sys.exit(f"[x] 证据文件不存在: {a.path}")
+def attach_evidence(c, project, event_id, path="", text=None, note="", keep_in_place=False):
+    """证据落库核心（CLI/面板/add --req 共用）。event_id=0 表示项目级物料。
+    默认把文件复制进 <db目录>/evidence/<project>/（随库走）；--text 直存文本；keep_in_place 只存指针。
+    返回 evidence id。"""
     import hashlib
+    import shutil
+
+    ev_dir = os.path.join(os.path.dirname(DB_PATH), "evidence", project)
+    if text is not None:
+        os.makedirs(ev_dir, exist_ok=True)
+        import uuid
+        fname = "ev_%s_%s_%s.txt" % (event_id, now().replace(":", "").replace("+", "p"),
+                                     uuid.uuid4().hex[:6])  # 秒级时间戳会撞车，加随机尾防覆盖
+        stored = os.path.join(ev_dir, fname)
+        with open(stored, "w", encoding="utf-8") as f:
+            f.write(text)
+        src_desc = "text"
+    else:
+        if not path or not os.path.exists(path):
+            sys.exit(f"[x] 证据文件不存在: {path}")
+        if keep_in_place:
+            stored = path
+        else:
+            os.makedirs(ev_dir, exist_ok=True)
+            base = os.path.basename(path)
+            stored = os.path.join(ev_dir, base)
+            if os.path.abspath(stored) != os.path.abspath(path):
+                n = 1
+                while os.path.exists(stored):
+                    root, ext = os.path.splitext(base)
+                    stored = os.path.join(ev_dir, f"{root}_{n}{ext}")
+                    n += 1
+                shutil.copy2(path, stored)
+        src_desc = path
     h = hashlib.sha256()
-    with open(a.path, "rb") as f:
+    with open(stored, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
+    if event_id != 0:
+        row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?",
+                        (event_id, project)).fetchone()
+        if not row:
+            sys.exit(f"[x] 记录不存在: #{event_id}")
+    cur = c.execute("INSERT INTO evidence(project,event_id,path,sha256,note,etype,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (project, event_id, stored, h.hexdigest(), note or "",
+                     "request" if (note or "").startswith("request")
+                     else "response" if (note or "").startswith("response") else "file",
+                     now()))
+    log_change(c, project, "evidence",
+               (f"#{event_id}" if event_id else "项目级") + f" ← {os.path.basename(stored)}")
+    return cur.lastrowid
+
+
+def cmd_evidence(a):
+    """证据入库：event_id=0 表示项目级物料（凭据表/报告等，不属于单个漏洞）。
+    默认把文件复制进套件 evidence/（随库走）；--keep-in-place 只存指针；
+    --text 直接把文本内容存为证据文件（复测的请求/响应原文零摩擦落库）。"""
     c = connect()
     require_project(c, a.project)
-    row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?",
-                    (a.event_id, a.project)).fetchone()
-    if not row:
-        sys.exit(f"[x] 记录不存在: #{a.event_id}")
-    cur = c.execute("INSERT INTO evidence(project,event_id,path,sha256,note,created_at) VALUES(?,?,?,?,?,?)",
-                    (a.project, a.event_id, a.path, h.hexdigest(), a.note or "", now()))
-    log_change(c, a.project, "evidence", f"#{a.event_id} ← {os.path.basename(a.path)}")
+    eid = attach_evidence(c, a.project, a.event_id, path=a.path, text=a.text,
+                          note=a.note, keep_in_place=a.keep_in_place)
     c.commit()
-    print(f"[ok] 证据 #{cur.lastrowid} 已挂到 #{a.event_id}（sha256={h.hexdigest()[:16]}…）")
+    tag = "引用" if a.keep_in_place else ("文本" if a.text is not None else "复制")
+    target = f"#{a.event_id}" if a.event_id else "项目级"
+    print(f"[ok] 证据 #{eid} 已挂到 {target}（{tag}）")
+
+
+def cmd_evidence_move(a):
+    """改挂证据归属：--event-id 0 = 转项目级物料。归属判定=复测该漏洞时必须用到。"""
+    c = connect()
+    require_project(c, a.project)
+    row = c.execute("SELECT id, event_id FROM evidence WHERE id=? AND project=?",
+                    (a.id, a.project)).fetchone()
+    if not row:
+        sys.exit(f"[x] 证据不存在: #{a.id}")
+    if a.event_id != 0:
+        r = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?",
+                      (a.event_id, a.project)).fetchone()
+        if not r:
+            sys.exit(f"[x] 目标记录不存在: #{a.event_id}")
+    c.execute("UPDATE evidence SET event_id=? WHERE id=?", (a.event_id, a.id))
+    log_change(c, a.project, "evidence-move",
+               f"证据 #{a.id}: #{row['event_id']} -> {'项目级' if a.event_id == 0 else '#' + str(a.event_id)}")
+    c.commit()
+    print(f"[ok] 证据 #{a.id} 已改挂到 {'项目级' if a.event_id == 0 else '#' + str(a.event_id)}")
 
 
 def cmd_verify(a):
@@ -1003,6 +1380,72 @@ def cmd_verify(a):
     log_change(c, a.project, "verify", f"#{a.id} 复测打点")
     c.commit()
     print(f"[ok] #{a.id} 已更新验证时间")
+
+
+def cmd_exec(a):
+    """执行落库单通道（recon 模式的推广）：AI 的探测/测试命令一律经本命令执行——
+    输出强制落盘 + test 事件自动入库 + 原始输出自动挂证据，杜绝"测了没记"。
+    用法：pentdb.py exec --project P --parent-ext N -- <命令...>（-- 后接实际命令，非交互）"""
+    import subprocess
+    import uuid
+    if not (a.parent_ext or "").strip():
+        sys.exit("[x] --parent-ext 必填：测试必须归因到被测对象 record id（多对象逗号分隔）")
+    cmd_str = (a.cmd or "").strip()
+    if not cmd_str:
+        sys.exit("[x] 缺 --cmd：exec --project P --parent-ext N --cmd '<完整命令>'（命令串原样执行）")
+    c = connect()
+    require_project(c, a.project)
+    t0 = datetime.datetime.now()
+    timed_out = False
+    try:
+        cp = subprocess.run(cmd_str, shell=True, capture_output=True, timeout=a.timeout)
+        raw = (cp.stdout or b"") + (cp.stderr or b"")
+        code = cp.returncode
+    except subprocess.TimeoutExpired as e:
+        raw = (e.stdout or b"") + (e.stderr or b"")
+        code = -1
+        timed_out = True
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("gbk", "ignore")
+    exec_dir = os.path.join(os.path.dirname(DB_PATH), "exec", a.project)
+    os.makedirs(exec_dir, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9_\-]+", "-", (a.action or cmd_str))[:40].strip("-") or "exec"
+    fname = "%s-%s-%s.log" % (t0.strftime("%H%M%S"), slug, uuid.uuid4().hex[:6])
+    out_path = os.path.join(exec_dir, fname)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("$ %s\nexit=%s\n\n%s" % (cmd_str, code, text))
+    note = (a.note or "").strip()
+    if timed_out:
+        note = ("命令超时(%ss)被终止；" % a.timeout) + note
+    detail = (a.detail + "\n" if a.detail else "") + \
+        "exit=%s ｜ 原始输出 %d 字节已随库（证据链 output 文件）" % (code, len(raw))
+    ns = argparse.Namespace(
+        project=a.project, ext_id="", kind="test",
+        value=(a.action or cmd_str)[:80],
+        title=a.title or ("exec: " + cmd_str[:57] + ("…" if len(cmd_str) > 57 else "")),
+        detail=detail, note=note, source=cmd_str,
+        parent_ext=a.parent_ext, merge_key="", status="confirmed",
+        confidence=a.confidence, severity=a.severity, code="", tech="", service="",
+        scope="in", auto=True, update=False, origin="agent", stage=a.stage or "")
+    try:
+        cmd_add(ns)
+    except SystemExit as e:
+        sys.exit(f"[x] exec 落库被拒: {e}")
+    row = c.execute("SELECT id FROM raw_events WHERE project=? AND kind='test' "
+                    "ORDER BY id DESC LIMIT 1", (a.project,)).fetchone()
+    eid = row["id"] if row else 0
+    ev_id = attach_evidence(c, a.project, eid, path=out_path, note="output " + slug)
+    c.commit()
+    print(f"[exec] #{eid} exit={code} ｜ 输出已挂证据 #{ev_id} ｜ {out_path}")
+    shown = text[:6000]
+    if len(text) > 6000:
+        shown += "\n…（截断，完整输出见上面证据文件）"
+    try:
+        sys.stdout.write(shown + "\n")
+    except UnicodeEncodeError:
+        sys.stdout.write(shown.encode("gbk", "ignore").decode("gbk", "ignore") + "\n")
 
 
 def cmd_stages(a):
@@ -1059,8 +1502,15 @@ def main():
     sp.add_argument("--kind", required=True)
     sp.add_argument("--value", required=True)
     sp.add_argument("--title", default="")
-    sp.add_argument("--detail", default="")
+    sp.add_argument("--detail", default=None,
+                    help="详情；--update 重扫时缺省=保留原 detail（多行物料建议经面板或脚本传 JSON）")
+    sp.add_argument("--detail-file", dest="detail_file", default="",
+                    help="从文件读 detail（复测物料包推荐方式，优先于 --detail）")
     sp.add_argument("--note", default="")
+    sp.add_argument("--req", default="",
+                    help="finding 专用：真实请求原文（文件路径或 - 接 stdin），自动挂 evidence note=request")
+    sp.add_argument("--resp", default="",
+                    help="finding 专用：真实响应原文（文件路径或 - 接 stdin），自动挂 evidence note=response")
     sp.add_argument("--source", required=True)
     sp.add_argument("--ext-id", dest="ext_id", default="")
     sp.add_argument("--parent-ext", dest="parent_ext", default="")
@@ -1079,6 +1529,22 @@ def main():
     sp.add_argument("--origin", default="agent", choices=VALID_ORIGIN)
     sp.set_defaults(fn=cmd_add)
 
+    sp = sub.add_parser("exec", help="执行落库单通道：命令输出自动落盘+test 事件+证据挂库（防『测了没记』）")
+    sp.add_argument("--project", required=True)
+    sp.add_argument("--parent-ext", dest="parent_ext", required=True,
+                    help="被测对象 record id（多对象逗号分隔）")
+    sp.add_argument("--cmd", required=True,
+                    help="完整命令串，原样执行（如 --cmd 'curl -is \"http://x\"'；外层单引号保内层双引号）")
+    sp.add_argument("--stage", default="", help="所属 SOP 阶段（建议必带）")
+    sp.add_argument("--action", default="", help="动作标签（进 value；缺省用命令本身）")
+    sp.add_argument("--title", default="")
+    sp.add_argument("--note", default="", help="结论（AI 判定写这里，复测时间轴展示）")
+    sp.add_argument("--detail", default="")
+    sp.add_argument("--severity", default="")
+    sp.add_argument("--confidence", default="high", help="AI 写入置信度（缺省 high）")
+    sp.add_argument("--timeout", type=int, default=120, help="命令超时秒数（超时仍落盘留痕）")
+    sp.set_defaults(fn=cmd_exec)
+
     sp = sub.add_parser("query")
     sp.add_argument("--project", required=True)
     sp.add_argument("--kind"); sp.add_argument("--status")
@@ -1096,6 +1562,10 @@ def main():
     sp.set_defaults(fn=cmd_review)
 
     sp = sub.add_parser("lint"); sp.add_argument("--project", required=True); sp.set_defaults(fn=cmd_lint)
+
+    sp = sub.add_parser("rebuild-assets", help="从资产类观测重建 assets 实体层（幂等；add/recon 后自动触发）")
+    sp.add_argument("--project", required=True)
+    sp.set_defaults(fn=cmd_rebuild_assets)
 
     sp = sub.add_parser("migrate")
     sp.add_argument("--from", dest="from_dir", required=True)
@@ -1132,9 +1602,18 @@ def main():
     sp = sub.add_parser("evidence")
     sp.add_argument("--project", required=True)
     sp.add_argument("--event-id", type=int, required=True)
-    sp.add_argument("--path", required=True)
+    sp.add_argument("--path", default="", help="证据文件路径（默认复制进套件 evidence/，--keep-in-place 只存指针）")
+    sp.add_argument("--text", default=None, help="直接存文本内容为证据文件（请求/响应原文）")
+    sp.add_argument("--keep-in-place", dest="keep_in_place", action="store_true",
+                    help="不复制，文件留在原处只存路径指针")
     sp.add_argument("--note", default="")
     sp.set_defaults(fn=cmd_evidence)
+
+    sp = sub.add_parser("evidence-move", help="改挂证据归属（--event-id 0 = 转项目级物料）")
+    sp.add_argument("--project", required=True)
+    sp.add_argument("--id", type=int, required=True, help="evidence 表 id")
+    sp.add_argument("--event-id", type=int, required=True, help="目标事件 id（0=项目级）")
+    sp.set_defaults(fn=cmd_evidence_move)
 
     sp = sub.add_parser("verify")
     sp.add_argument("--project", required=True)

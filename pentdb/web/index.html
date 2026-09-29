@@ -4,74 +4,8 @@
 <meta charset="utf-8">
 <title>PentDB · 侦察面板</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root{
-    --bg:#f7f7f5; --card:#ffffff; --line:#e4e2dc; --tx:#2c2c2a; --tx2:#6b6a66;
-    --blue:#185fa5; --blue-bg:#e6f1fb; --teal:#0f6e56; --teal-bg:#e1f5ee;
-    --amber:#854f0b; --amber-bg:#faeeda; --red:#a32d2d; --red-bg:#fcebeb;
-    --purple:#534ab7; --purple-bg:#eeedfe; --gray-bg:#f1efe8;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--tx)}
-  header{display:flex;align-items:center;gap:16px;padding:10px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-  header h1{font-size:15px;font-weight:500;margin:0;color:var(--purple)}
-  select,button,input{font:inherit;padding:4px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--tx)}
-  select:focus,input:focus{outline:1px solid var(--purple)}
-  button{cursor:pointer} button:hover{border-color:var(--purple)}
-  .tabs{display:flex;gap:4px;padding:8px 20px 0;background:var(--card);border-bottom:1px solid var(--line)}
-  .tabs button{border:1px solid transparent;border-bottom:none;background:none;color:var(--tx2);border-radius:8px 8px 0 0;padding:6px 14px}
-  .tabs button.on{background:var(--bg);border-color:var(--line);color:var(--purple);font-weight:500}
-  main{padding:16px 20px;max-width:1100px;margin:0 auto}
-  .cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 16px;min-width:120px}
-  .card b{font-size:22px;display:block} .card span{font-size:12px;color:var(--tx2)}
-  .card.click{cursor:pointer;transition:border-color .15s}
-  .card.click:hover{border-color:var(--purple)}
-  .card.on{border-color:var(--purple);box-shadow:0 0 0 1px var(--purple) inset}
-  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin-bottom:16px}
-  .panel h3{margin:4px 0 8px;font-size:13px;font-weight:500;color:var(--tx2)}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{ text-align:left;color:var(--tx2);font-weight:400;border-bottom:1px solid var(--line);padding:4px 8px}
-  td{border-bottom:1px solid var(--line);padding:5px 8px;vertical-align:top}
-  tr:hover td{background:var(--gray-bg)}
-  .tag{display:inline-block;padding:0 8px;border-radius:10px;font-size:12px}
-  .t-new{background:var(--amber-bg);color:var(--amber)}
-  .t-confirmed{background:var(--teal-bg);color:var(--teal)}
-  .t-rejected{background:#eeeeec;color:var(--tx2)}
-  .t-kind{background:var(--blue-bg);color:var(--blue)}
-  .sev-crit{background:var(--red-bg);color:var(--red)}
-  .sev-high{background:#faece7;color:#993c1d}
-  .sev-med{background:var(--amber-bg);color:var(--amber)}
-  .sev-low{background:var(--blue-bg);color:var(--blue)}
-  .sev-info{background:var(--gray-bg);color:var(--tx2)}
-  .sev-none{background:none;border:1px dashed var(--line);color:var(--tx2)}
-  .scp-in{background:var(--teal-bg);color:var(--teal)}
-  .scp-out{background:var(--red-bg);color:var(--red)}
-  .scp-unknown{background:var(--gray-bg);color:var(--tx2)}
-  .fitem{border-bottom:1px solid var(--line);padding:8px 0}
-  .fitem:last-child{border-bottom:none}
-  .fitem b{font-size:14px}
-  .fitem .detail{color:var(--tx2);font-size:13px;margin:2px 0;white-space:pre-wrap}
-  .stepper{display:flex;gap:6px;flex-wrap:wrap}
-  .step{padding:3px 12px;border-radius:14px;font-size:12px;background:var(--gray-bg);color:var(--tx2);border:1px solid var(--line)}
-  .step.cur{background:var(--purple-bg);color:var(--purple);font-weight:500}
-  .step.done{background:var(--teal-bg);color:var(--teal)}
-  .st-done{color:var(--teal)} .st-registered{color:var(--amber)} .st-missing{color:var(--red)} .st-waived{color:var(--tx2)}
-  .sopitem{display:inline-block;margin:2px 6px 2px 0;font-size:12px}
-  .sopitem button{font-size:11px;padding:0 6px;margin-left:4px}
-  .rec{border-bottom:1px solid var(--line);padding:8px 0}
-  .rec:last-child{border-bottom:none}
-  .rec .hd b{font-size:13px}
-  .src{color:var(--tx2);font-size:12px;font-family:Consolas,monospace;word-break:break-all}
-  .btn-ok{background:var(--teal-bg);color:var(--teal);border-color:var(--teal)}
-  .btn-no{background:var(--red-bg);color:var(--red);border-color:var(--red)}
-  .grp{margin:0 0 14px} .grp h4{margin:6px 0;font-size:13px;color:var(--purple);font-weight:500}
-  .grp li{margin:2px 0}
-  .muted{color:var(--tx2);font-size:12px}
-  pre{white-space:pre-wrap;word-break:break-word;background:var(--gray-bg);border:1px solid var(--line);border-radius:8px;padding:12px;font:12px/1.5 Consolas,"Microsoft YaHei",monospace}
-  .hidden{display:none}
-  .filters{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
-</style>
+<link rel="stylesheet" href="style.css">
+
 </head>
 <body>
 <header>
@@ -106,14 +40,26 @@
     <div class="panel"><h3>逐记录必测覆盖（未登记/已登记项可豁免，豁免必填理由留痕）</h3><div id="sop-per"></div></div>
   </section>
   <section id="v-findings" class="hidden">
+    <details class="panel"><summary style="cursor:pointer"><span style="font-size:13px;color:var(--tx2)">项目物料（凭据表 / 原始报告 / 访问说明 —— 项目级，不属于单个漏洞）</span></summary>
+      <div id="proj-ev" class="muted" style="margin-top:8px">…</div></details>
     <div class="filters">
+      <input id="f-find-q" placeholder="搜索标题 / 目标 / detail…" style="flex:1;min-width:160px" oninput="loadFindings()">
+      <span id="sev-chips" style="display:flex;gap:6px;flex-wrap:wrap"></span>
       <select id="f-find-status" onchange="findStatus=this.value;loadFindings()">
-        <option value="">全部状态</option><option>new</option><option>confirmed</option><option>rejected</option>
+        <option value="">全部人审态</option><option>new</option><option>confirmed</option><option>rejected</option>
       </select>
-      <span class="muted">点严重级别卡可只看该级别（再点取消）；点发现的目标值可跳资产明细看上下文</span>
     </div>
-    <div class="cards" id="sev-cards"></div>
-    <div class="panel"><h3>漏洞 / 发现聚合（严重级别 → 状态；AI 落库时带 --severity，人审确认后生效）</h3><div id="findings-list"></div></div>
+    <div class="find-grid">
+      <div class="panel" style="overflow:auto;max-height:calc(100vh - 200px)">
+        <h3>漏洞 / 发现<span id="find-count" class="muted" style="margin-left:8px;font-weight:400"></span></h3>
+        <div id="findings-list"></div>
+        <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">情报参考（osint，非漏洞）</summary>
+          <div id="osint-list" style="margin-top:4px"></div></details>
+      </div>
+      <div class="panel" style="overflow:auto;max-height:calc(100vh - 200px)">
+        <div id="finding-detail"></div>
+      </div>
+    </div>
   </section>
   <section id="v-assets" class="hidden">
     <div class="panel"><h3>手动补录（人在测试中看到的东西直接入库；origin=human 自动 confirmed，来源必填）</h3>
@@ -130,12 +76,14 @@
       <div class="muted" id="m-msg"></div>
     </div>
     <div class="filters">
-      <select id="f-kind"><option value="">全部类型</option></select>
-      <select id="f-status"><option value="">全部状态</option><option>new</option><option>confirmed</option><option>rejected</option></select>
-      <input id="f-q" placeholder="搜索 value/note/detail…" style="flex:1;min-width:180px">
+      <select id="f-atype"><option value="">全部类型</option><option>domain</option><option>host</option><option>service</option><option>endpoint</option></select>
+      <select id="f-status"><option value="">全部状态</option><option value="confirmed">已确认</option><option value="pending">有待审</option><option value="rejected">已驳回</option></select>
+      <input id="f-q" placeholder="搜索实体 key / 属性…" style="flex:1;min-width:180px">
+      <span id="asset-hint" class="muted"></span>
       <button onclick="loadAssets()">查询</button>
     </div>
     <div class="panel" style="overflow-x:auto"><table id="asset-table"></table></div>
+    <div class="panel"><h3>实体观测下钻（点击资产行展开该实体的全部原始观测；观测即 raw_events，人审在「待审队列」做）</h3><div id="asset-detail" class="muted">← 点击资产行下钻原始观测</div></div>
   </section>
   <section id="v-timeline" class="hidden">
     <div class="panel"><h3>最近事件（倒序，最多 100 条）</h3><table id="tl-events"></table></div>
@@ -149,7 +97,7 @@
         <button class="btn-no" onclick="doBatch('rejected')">驳回所选</button>
       </h3>
     </div>
-    <div class="panel"><h3>AI 推断与待确认项 —— 按来源分组（待审项天然成批），逐条或勾选批量处理；批量必须留批注；驳回即回滚视图、原始证据保留</h3><table id="review-table"></table></div>
+    <div class="panel"><h3>AI 推断与待确认项 —— 按来源分组（待审项天然成批），逐条或勾选批量处理；点行展开备注全文 + 证据物料 + 同值观测；批量必须留批注；驳回即回滚视图、原始证据保留</h3><table id="review-table"></table></div>
   </section>
   <section id="v-report" class="hidden">
     <div class="panel">
@@ -167,329 +115,7 @@
     </div>
   </section>
 </main>
-<script>
-const $=s=>document.querySelector(s);
-const Kinds=["domain","port","path","param","finding","osint","note","test"];
-let PROJECT="";
-const qs=o=>new URLSearchParams(o).toString();
-async function api(path,params){const r=await fetch("/api/"+path+(params?"?"+qs(params):""));if(!r.ok)throw new Error(await r.text());return r.json()}
+<script src="app.js"></script>
 
-async function boot(){
-  const d=await api("projects");
-  const sel=$("#proj"); sel.innerHTML=d.projects.map(p=>`<option>${p.name}</option>`).join("");
-  PROJECT=sel.value||(new URLSearchParams(location.search).get("project")||"");
-  if(PROJECT)sel.value=PROJECT;
-  sel.onchange=()=>{PROJECT=sel.value;location.search="?project="+PROJECT};
-  $("#f-kind").innerHTML='<option value="">全部类型</option>'+Kinds.map(k=>`<option>${k}</option>`).join("");
-  $("#m-kind").innerHTML=Kinds.filter(k=>k!=="test").map(k=>`<option>${k}</option>`).join("");
-  $("#m-kind").onchange=()=>$("#m-sev").classList.toggle("hidden",$("#m-kind").value!=="finding");
-  loadAll();
-}
-function loadAll(){loadOverview();loadSop();loadLint();loadFindings();loadAssets();loadTimeline();loadReview();loadReport()}
-
-const ST_TXT={done:"✓ 已测",registered:"◐ 已登记",missing:"○ 未登记",waived:"⊘ 已豁免"};
-let sopFilter=null;
-async function loadSop(){
-  const d=await api("sop",{project:PROJECT});
-  const st=await api("stages",{project:PROJECT});
-  const enabled=new Set(st.enabled||[]);
-  $("#stage-toggles").innerHTML=(st.all||[]).map(s=>
-    `<span class="step ${enabled.has(s)?'done':''}" style="cursor:pointer;opacity:${enabled.has(s)?1:.45}"
-      onclick="toggleStage('${s}')">${enabled.has(s)?'✓ ':''}${s}</span>`).join("");
-  const stages=Object.keys(d.stage.flags||{});
-  const cur=d.stage.index;
-  $("#sop-stage").innerHTML='<div class="stepper">'+stages.map((s,i)=>
-    `<span class="step ${i<cur?'done':(i===cur?'cur':'')}">${i<cur?'✓ ':''}${s}</span>`).join("")+
-    `<span class="muted" style="align-self:center;margin-left:8px">${d.stage.current}（${d.stage.index}/${d.stage.total}）</span></div>`;
-  const ST_COLOR={done:"var(--teal)",registered:"var(--amber)",missing:"var(--red)"};
-  const sc=(n,label,st)=>st
-    ?`<div class="card click ${sopFilter===st?"on":""}" data-st="${st}" title="点击只看该状态，再点取消">`+
-     `<b style="color:${ST_COLOR[st]||""}">${n}</b><span>${label}${sopFilter===st?" ●":""}</span></div>`
-    :`<div class="card"><b>${n}</b><span>${label}</span></div>`;
-  $("#sop-cards").innerHTML=
-    sc(d.total,"必测项","")+sc(d.done,"✓ 已测","done")+
-    sc(d.registered,"◐ 已登记","registered")+sc(d.missing,"○ 未登记","missing")+
-    sc(d.waived,"⊘ 已豁免","waived");
-  const per=d.per||{};
-  const ids=Object.keys(per).sort((a,b)=>parseInt(a)-parseInt(b));
-  $("#sop-per").innerHTML=ids.map(rid=>{
-    const r=per[rid];
-    const items=sopFilter?r.items.filter(it=>it.state===sopFilter):r.items;
-    if(sopFilter&&!items.length)return "";
-    const itemHtml=items.map(it=>{
-      let html=`<span class="sopitem st-${it.state}">${ST_TXT[it.state]} ${it.stage?esc(it.stage)+"：":""}${esc(it.term)}`;
-      if(it.state==="missing"||it.state==="registered")
-        html+=`<button onclick="doWaive(${rid},'${esc(it.term).replace(/'/g,"&#39;")}')">豁免</button>`;
-      return html+`</span>`;
-    }).join("");
-    return `<div class="rec"><div class="hd"><b>#${rid}</b> ${kindTag(r.kind)} ${esc(r.label)} `+
-      `<span class="muted">${r.done+r.waived}/${r.total} 完成</span></div><div>${itemHtml}</div></div>`;
-  }).join("")||(sopFilter?"<div class='muted'>当前状态过滤下无记录</div>":"<div class='muted'>当前没有命中必测规则的记录（规则匹配 kind: domain/port/path/param/finding）</div>");
-  // 阶段视图：计划（菜单）× 执行（test 流水）；状态过滤时只留含匹配项的阶段
-  const SV_TXT={done:"✓",registered:"◐",missing:"○",waived:"⊘"};
-  $("#stage-view").innerHTML=(d.stage_view||[]).filter(v=>
-    !sopFilter||v.menu.some(it=>it.state===sopFilter)).map(v=>{
-    const menuItems=sopFilter?v.menu.filter(it=>it.state===sopFilter):v.menu;
-    const menu=menuItems.map(it=>{
-      let h=`<span class="sopitem st-${it.state}" title="${ST_TXT[it.state]}">${SV_TXT[it.state]} ${esc(it.term)}`;
-      if(it.state==="done"&&it.ev)h+=` <span class="muted">${it.ev}</span>`;
-      if(it.state==="missing"||it.state==="registered")
-        h+=`<button onclick="doWaive(0,'${esc(it.term).replace(/'/g,"&#39;")}')">豁免</button>`;
-      return h+`</span>`;
-    }).join("")||"<span class='muted'>该阶段未定义必测菜单</span>";
-    const exe=v.executed.length?v.executed.map(t=>
-      `<div class="rec"><div class="hd"><b>#${t.id}</b> ${esc(t.value)} ${tag(t.status)} `+
-      `<span class="muted">${t.created_at}</span></div>`+
-      (t.note?`<div class="muted">${esc(t.note)}</div>`:"")+
-      `<div class="src">归因: ${t.parent_ext?esc(t.parent_ext):"—"} ｜ 来源: ${esc(t.source)}</div></div>`).join("")
-      :"<span class='muted'>暂无执行流水（AI 执行后 add --kind test --stage "+esc(v.stage)+" 落库即在此聚合）</span>";
-    const pend=(v.pending.length&&(!sopFilter||sopFilter==="registered"))?`<div class="muted" style="margin:2px 0">登记待执行：${v.pending.map(p=>esc(p.term)).join("、")}</div>`:"";
-    return `<div class="grp"><h4>${v.complete?"✓ ":""}${esc(v.stage)}（${v.done+v.waived}/${v.total} 完成 · 流水 ${v.executed.length} 条）</h4>`+
-      `<div style="margin-bottom:4px">${menu}</div>${pend}`+
-      `<details ${v.executed.length?"open":""}><summary class="muted" style="cursor:pointer">执行流水（${v.executed.length}）</summary>${exe}</details></div>`;
-  }).join("")||(sopFilter?"<div class='muted'>当前状态过滤下无阶段菜单项</div>":"<div class='muted'>无阶段数据</div>");
-}
-$("#sop-cards").onclick=e=>{
-  const c=e.target.closest(".card[data-st]"); if(!c)return;
-  sopFilter=(sopFilter===c.dataset.st)?null:c.dataset.st;
-  loadSop();
-};
-async function toggleStage(s){
-  const st=await api("stages",{project:PROJECT});
-  let enabled=new Set(st.enabled||[]);
-  enabled.has(s)?enabled.delete(s):enabled.add(s);
-  await fetch("/api/stages",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({project:PROJECT,enabled:[...enabled]})});
-  const el=$("#stages-saved");
-  el.textContent="已自动保存 ✓";
-  setTimeout(()=>{el.textContent=""},2000);
-  loadSop();
-}
-async function doWaive(id,term){
-  const reason=prompt("豁免「"+term+"」的理由（必填，收尾时提交裁决）：");
-  if(!reason)return;
-  await fetch("/api/waive",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({id,term,reason,project:PROJECT})});
-  loadSop();
-}
-
-async function loadLint(btn){
-  const t0=new Date().toLocaleTimeString();
-  if(btn){btn.disabled=true;btn.textContent="检查中…";}
-  try{
-    const d=await api("lint",{project:PROJECT});
-    const E=d.errors||[],W=d.warns||[];
-    $("#lint-sum").innerHTML=E.length?`<span class="tag sev-crit">error × ${E.length}</span>`+
-      (W.length?` <span class="tag sev-med">warn × ${W.length}</span>`:""):
-      (W.length?`<span class="tag sev-med">warn × ${W.length}</span>`:`<span class="tag t-confirmed">0 error ✓ 通过</span>`);
-    $("#lint-out").innerHTML=
-      E.map(e=>`<div style="color:var(--red)">✖ ${esc(e)}</div>`).join("")+
-      W.map(w=>`<div style="color:var(--amber)">⚠ ${esc(w)}</div>`).join("")||
-      "<span style='color:var(--teal)'>全部记录通过门禁检查（source 溯源 / 状态 / scope / test 归因）</span>";
-    $("#lint-at").textContent="检查于 "+t0;
-  }catch(e){
-    $("#lint-sum").innerHTML="";
-    $("#lint-out").innerHTML=`<span style="color:var(--red)">检查失败：${esc(e.message)}</span>`;
-  }finally{
-    if(btn){btn.disabled=false;btn.textContent="重新检查";}
-  }
-}
-
-async function manualAdd(){
-  const kind=$("#m-kind").value;
-  const body={project:PROJECT,kind:kind,value:$("#m-value").value,note:$("#m-note").value,
-    source:$("#m-source").value,scope:$("#m-scope").value,update:$("#m-update").checked};
-  if(kind==="finding")body.severity=$("#m-sev").value;
-  const msg=$("#m-msg");
-  try{
-    const r=await fetch("/api/manual-add",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(body)});
-    const d=await r.json();
-    if(!r.ok)throw new Error(d.error||r.status);
-    msg.style.color="var(--teal)";
-    msg.textContent=`已入库 ✓ #${d.id||""} ${body.kind} ${body.value}（origin=human，自动 confirmed）`;
-    $("#m-value").value="";$("#m-note").value="";
-    loadOverview();loadAssets();loadFindings();loadLint();
-  }catch(e){
-    msg.style.color="var(--red)";
-    msg.textContent="入库失败："+e.message;
-  }
-}
-
-function tag(s){return `<span class="tag t-${s}">${s}</span>`}
-function kindTag(k){return `<span class="tag t-kind">${k}</span>`}
-function scopeTag(s){s=s||"unknown";return `<span class="tag scp-${s}">${s==="in"?"in-scope":(s==="out"?"OUT":"scope?")}</span>`}
-
-async function loadOverview(){
-  const d=await api("overview",{project:PROJECT});
-  const sug=await api("suggestions",{project:PROJECT});
-  $("#sug-list").innerHTML=(sug.suggestions||[]).map(r=>
-    `<div class="fitem"><b>${esc(r.title||"建议")}</b> ${tag(r.status)} `+
-    `<span class="muted">#${r.id} · ${r.created_at} · ${r.origin}</span>`+
-    (r.value?`<div class="detail">${esc(r.value)}</div>`:"")+
-    (r.note?`<div class="muted">依据：${esc(r.note)}</div>`:"")+
-    `<div class="src">来源：${esc(r.source)}</div>`+
-    (r.status==="new"?`<div><button class="btn-ok" onclick="doReview(${r.id},'confirmed')">采纳</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">忽略</button></div>`:"")+
-    `</div>`).join("")||"<div class='muted'>暂无建议（AI 在采集/测试批次结束后生成）</div>";
-  const st=d.by_status||{}, bk=d.by_kind||{};
-  const card=(n,label,attrs)=>n>0
-    ?`<div class="card click" ${attrs} title="点击查看明细"><b>${n}</b><span>${label}</span></div>`
-    :`<div class="card"><b>${n}</b><span>${label}</span></div>`;
-  $("#stat-cards").innerHTML=
-    card((st.new||0)+(st.confirmed||0)+(st.rejected||0),"事件总数",'data-tab="assets"')+
-    card(st.confirmed||0,"已确认",'data-tab="assets" data-status="confirmed"')+
-    card(st.new||0,"待审核",'data-tab="review"')+
-    card(bk.domain||0,"域名/子域",'data-tab="assets" data-kind="domain"')+
-    card((bk.finding||0)+(bk.osint||0),"发现/情报",'data-tab="findings"')+
-    Kinds.filter(k=>bk[k]&&k!=="domain"&&k!=="finding").map(k=>
-      card(bk[k],k,`data-tab="assets" data-kind="${k}"`)).join("");
-  $("#stat-cards").onclick=e=>{
-    const c=e.target.closest(".card[data-tab]");
-    if(!c)return;
-    if(c.dataset.tab==="assets")gotoAssets(c.dataset.kind||"",c.dataset.status||"",c.dataset.q||"");
-    else switchTab(c.dataset.tab);
-  };
-  const groups={};
-  (d.domains||[]).forEach(r=>{
-    const parts=r.value.split(".");
-    const base=parts.length>2?parts.slice(-(parts[parts.length-2].length<=3?3:2)).join("."):r.value;
-    (groups[base]=groups[base]||[]).push(r);
-  });
-  $("#domain-groups").innerHTML=Object.keys(groups).sort().map(base=>
-    `<div class="grp"><h4 style="cursor:pointer" title="点击在资产明细中搜索该主域" onclick="gotoAssets('','','${base}')">${base}（${groups[base].length}）</h4><ul>`+
-    groups[base].map(r=>`<li style="cursor:pointer" title="点击在资产明细中搜索" onclick="gotoAssets('','','${r.value}')">${r.value} ${tag(r.status)} ${scopeTag(r.scope)} `+
-      `${r.tech?`<span class="tag t-kind">${esc(r.tech)}</span>`:""} `+
-      `${r.note?`<span class="muted">— ${esc(r.note)}</span>`:""}</li>`).join("")+
-    `</ul></div>`).join("");
-}
-const SEVS=[["crit","严重"],["high","高危"],["med","中危"],["low","低危"],["info","信息"],["","未分级"]];
-let sevFilter=null, findStatus="";
-async function loadFindings(){
-  const d=await api("findings",{project:PROJECT});
-  const fs=(d.findings||[]).filter(r=>!findStatus||r.status===findStatus);
-  const bySev={}; fs.forEach(r=>{(bySev[r.severity||""]=bySev[r.severity||""]||[]).push(r)});
-  $("#sev-cards").innerHTML=SEVS.map(([k,label])=>{
-    const n=(bySev[k]||[]).length, on=sevFilter===k;
-    return `<div class="card click ${on?"on":""}" data-sev="${k}" title="点击只看该级别，再点取消">`+
-      `<b>${n}</b><span>${label}${on?" ●":""}</span></div>`;
-  }).join("");
-  const groupsShow=sevFilter===null?SEVS:SEVS.filter(([k])=>k===sevFilter);
-  $("#findings-list").innerHTML=groupsShow.map(([k,label])=>{
-    const rows=(bySev[k]||[]); if(!rows.length)return sevFilter===null?"":`<div class='muted'>该级别在当前状态筛选下无记录</div>`;
-    return `<h4 style="margin:10px 0 4px;color:var(--purple)"><span class="tag sev-${k||"none"}">${label}</span> × ${rows.length}</h4>`+
-      rows.map(r=>`<div class="fitem">`+
-        `<b>${esc(r.title||r.value)}</b> ${tag(r.status)} ${kindTag(r.kind)} `+
-        `<span class="muted">#${r.id} · ${r.created_at} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span>`+
-        (r.value&&r.value!==r.title?`<div><span class="muted" style="cursor:pointer;text-decoration:underline dotted" data-q="${esc(r.value)}" title="点击在资产明细中查看目标上下文">${esc(r.value)}</span></div>`:"")+
-        (r.detail?`<div class="detail">${esc(r.detail)}</div>`:"")+
-        (r.note?`<div class="muted">备注：${esc(r.note)}</div>`:"")+
-        `<div class="src">来源：${esc(r.source)}</div>`+
-      `</div>`).join("");
-  }).join("")||`<div class='muted'>暂无发现${findStatus?"（当前状态筛选下）":""}</div>`;
-}
-$("#sev-cards").onclick=e=>{
-  const c=e.target.closest(".card[data-sev]"); if(!c)return;
-  sevFilter=(sevFilter===c.dataset.sev)?null:c.dataset.sev;
-  loadFindings();
-};
-$("#findings-list").onclick=e=>{
-  const el=e.target.closest("[data-q]"); if(!el)return;
-  gotoAssets("","",el.dataset.q);
-};
-function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
-
-async function loadAssets(){
-  const d=await api("events",{project:PROJECT,kind:$("#f-kind").value,status:$("#f-status").value,q:$("#f-q").value});
-  $("#asset-table").innerHTML="<tr><th>#</th><th>类型</th><th>值 / 标题</th><th>备注</th><th>状态</th><th>技术</th><th>证据</th><th>来源</th></tr>"+
-    d.events.map(r=>`<tr><td>${r.id}</td><td>${kindTag(r.kind)}</td>`+
-    `<td><b>${esc(r.value)}</b>${r.title?`<br><span class="muted">${esc(r.title)}</span>`:""}${r.detail?`<br><span class="muted">${esc(r.detail).slice(0,200)}</span>`:""}</td>`+
-    `<td>${esc(r.note)}</td><td>${tag(r.status)} ${r.kind!=="test"?scopeTag(r.scope):""}<br><span class="muted">${r.origin}${r.confidence?"/"+r.confidence:""}</span></td>`+
-    `<td>${[r.tech,r.service].filter(Boolean).map(t=>`<span class="tag t-kind">${esc(t)}</span>`).join(" ")||'<span class="muted">—</span>'}</td>`+
-    `<td>${r.ev_count?`📎${r.ev_count}`:'<span class="muted">0</span>'}</td>`+
-    `<td class="src">${esc(r.source)}</td></tr>`).join("")||"<tr><td>无数据</td></tr>";
-}
-
-async function loadTimeline(){
-  const d=await api("timeline",{project:PROJECT});
-  $("#tl-events").innerHTML="<tr><th>时间</th><th>类型</th><th>值</th><th>状态</th><th>来源</th></tr>"+
-    d.events.map(r=>`<tr><td class="muted">${r.created_at}</td><td>${kindTag(r.kind)}</td><td>${esc(r.value)}</td><td>${tag(r.status)}</td><td class="src">${esc(r.source).slice(0,90)}</td></tr>`).join("");
-  $("#tl-changes").innerHTML="<tr><th>时间</th><th>动作</th><th>明细</th></tr>"+
-    d.changes.map(r=>`<tr><td class="muted">${r.at}</td><td>${esc(r.action)}</td><td>${esc(r.detail)}</td></tr>`).join("");
-}
-
-async function loadReview(){
-  const d=await api("pending",{project:PROJECT});
-  const items=d.pending||[];
-  const groups={};
-  items.forEach(r=>{(groups[r.source||"(无来源)"]=groups[r.source||"(无来源)"]||[]).push(r)});
-  let html="";
-  Object.keys(groups).sort((a,b)=>groups[b].length-groups[a].length).forEach((src,gi)=>{
-    const g=groups[src];
-    html+=`<tr style="background:var(--gray-bg)"><td colspan="2"><b>${esc(src)}</b> `+
-      `<span class="muted">× ${g.length}</span>`+
-      ` <label class="muted" style="margin-left:10px"><input type="checkbox" onchange="tgGroup(${gi},this.checked)"> 全选本组</label></td></tr>`;
-    g.forEach(r=>{
-      html+=`<tr><td><input type="checkbox" class="rv-check" data-g="g${gi}" data-id="${r.id}" onchange="updBatch()"></td>`+
-        `<td><b>#${r.id}</b> ${kindTag(r.kind)} <b>${esc(r.value)}</b>`+
-        (r.note?`<br><span class="muted">${esc(r.note)}</span>`:"")+
-        (r.detail?`<br><span class="muted">${esc(r.detail).slice(0,160)}</span>`:"")+
-        `<br><span class="muted">${r.origin}${r.confidence?"/"+r.confidence:""} · ${esc(r.source).slice(0,90)}</span>`+
-        ` <button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button></td></tr>`;
-    });
-  });
-  $("#review-table").innerHTML=html||"<tr><td>队列已清空，全部处理完毕</td></tr>";
-  updBatch();
-}
-function tgGroup(gi,on){
-  document.querySelectorAll(`#review-table input.rv-check[data-g="g${gi}"]`).forEach(c=>c.checked=on);
-  updBatch();
-}
-function updBatch(){
-  const n=document.querySelectorAll("#review-table input.rv-check:checked").length;
-  $("#batch-n").textContent=n;
-  $("#batch-bar").style.display=n?"":"none";
-}
-async function doBatch(action){
-  const ids=[...document.querySelectorAll("#review-table input.rv-check:checked")].map(c=>+c.dataset.id);
-  if(!ids.length)return;
-  const note=$("#batch-note").value.trim();
-  if(!note){alert("批量操作必须填批注（写入每条留痕）");return;}
-  if(!confirm(`确定${action==="confirmed"?"确认":"驳回"} ${ids.length} 条？`))return;
-  const r=await fetch("/api/review",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ids,action,note})});
-  if(!r.ok){alert(await r.text());return;}
-  $("#batch-note").value="";
-  loadAll();
-}
-async function doReview(id,action){
-  await fetch("/api/review",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({id,action})});
-  loadAll();
-}
-
-async function loadReport(){
-  const tpl=$("#r-tpl").value;
-  const d=await api("report",{project:PROJECT,template:tpl});
-  $("#report-pre").textContent=d.report;
-  $("#dl-link").download=(tpl==="pentest"?"pentest-report":"recon-report")+".md";
-  $("#dl-link").href=URL.createObjectURL(new Blob([d.report],{type:"text/markdown"}));
-}
-function copyReport(){navigator.clipboard.writeText($("#report-pre").textContent)}
-
-document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>switchTab(b.dataset.v));
-function switchTab(v){
-  document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("on",x.dataset.v===v));
-  document.querySelectorAll("main section").forEach(s=>s.classList.add("hidden"));
-  $("#v-"+v).classList.remove("hidden");
-}
-function gotoAssets(kind,status,q){
-  $("#f-kind").value=kind||"";
-  $("#f-status").value=status||"";
-  $("#f-q").value=q||"";
-  switchTab("assets");
-  loadAssets();
-}
-boot();
-</script>
 </body>
 </html>

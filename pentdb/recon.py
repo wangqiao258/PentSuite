@@ -125,7 +125,7 @@ def run(args):
             detail="", note=note, source=f"{source}；HTTP 探测 {res['url']}",
             parent_ext="", merge_key="", status="confirmed", confidence="high",
             severity="", code=str(res["code"]), tech=res["server"], service="",
-            scope="in", auto=True, update=True, origin="agent")
+            scope="in", auto=True, update=True, origin="agent", stage="")
         try:
             pdb.cmd_add(ns)
             if is_update:
@@ -214,7 +214,7 @@ def run_js(args):
                     title="", detail="", note=f"来自 JS 提取（未探测，code 空）",
                     source=f"JS 解析 {u}", parent_ext=str(dom_row["id"]) if dom_row else "",
                     merge_key="", status="confirmed", confidence="medium", severity="",
-                    code="", tech="", service="", scope="in", auto=True, origin="agent")
+                    code="", tech="", service="", scope="in", auto=True, origin="agent", stage="")
                 try:
                     pdb.cmd_add(ns)
                     n_ep += 1
@@ -231,7 +231,8 @@ def run_js(args):
                         note=f"自动提取，可能为占位符/测试值，待人审",
                         source=f"JS 解析 {u}", parent_ext="", merge_key="",
                         status="new", confidence="medium", severity="high",
-                        code="", tech="", service="", scope="in", auto=False, origin="agent")
+                        code="", tech="", service="", scope="in", auto=False,
+                        origin="agent", stage="")
                     try:
                         pdb.cmd_add(ns)
                         n_key += 1

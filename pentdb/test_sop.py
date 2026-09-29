@@ -130,7 +130,8 @@ class SopStageView(unittest.TestCase):
         c.commit(); c.close()
         # 端口扫描阶段的测试事实：parent_ext=0（项目级归因）
         add(kind="test", value="服务识别 nmap -sV 1.2.3.4", parent_ext="0",
-            status="confirmed", auto=True, confidence="high", stage="端口扫描")
+            note="nmap 服务识别结果", status="confirmed", auto=True, confidence="high",
+            stage="端口扫描")
         # 待审 pending（术语反查回填 stage）
         c = pentdb.connect()
         c.execute("INSERT INTO pending_tests(project,event_id,term,created_at,stage) VALUES(?,?,?,?,?)",
