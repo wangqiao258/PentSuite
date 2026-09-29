@@ -31,8 +31,7 @@
   </section>
   <section id="v-sop" class="hidden">
     <div class="panel"><h3>Lint 门禁（收尾要求 0 error）<button id="lint-btn" onclick="loadLint(this)">重新检查</button><span id="lint-sum" style="margin-left:10px"></span><span id="lint-at" class="muted" style="margin-left:8px"></span><span class="muted" style="margin-left:8px">只扫数据质量（溯源/合法性/归因），不执行测试</span></h3><div id="lint-out" class="muted">…</div></div>
-    <div class="panel"><h3>阶段进度（点击阶段名开/关，自动保存即时生效；提示清单在 sop/default.json 走 git）<span id="stages-saved" class="muted" style="margin-left:10px;color:var(--teal)"></span></h3>
-      <div class="stepper" id="stage-toggles" style="margin-bottom:8px"></div>
+    <div class="panel"><h3>阶段进度（7 阶段骨架固定，提示适用性由 AI 按 when 语义判断）<span id="stages-saved" class="muted" style="margin-left:10px;color:var(--teal)"></span></h3>
       <div class="stepper" id="sop-stage"></div></div>
     <div class="cards" id="sop-cards"></div>
     <div class="muted" style="margin:-6px 0 12px">SOP 是给 AI 的查漏补缺提示（非门禁、非义务）：按 when 语义命中才对照 check，未测项由 AI 申报不适用/原因即可，不设豁免；点状态卡可只看该状态，再点取消</div>

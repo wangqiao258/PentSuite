@@ -21,11 +21,6 @@ const ST_TXT={done:"✓ 已测",registered:"◐ 已登记",missing:"○ 未测(�
 let sopFilter=null;
 async function loadSop(){
   const d=await api("sop",{project:PROJECT});
-  const st=await api("stages",{project:PROJECT});
-  const enabled=new Set(st.enabled||[]);
-  $("#stage-toggles").innerHTML=(st.all||[]).map(s=>
-    `<span class="step ${enabled.has(s)?'done':''}" style="cursor:pointer;opacity:${enabled.has(s)?1:.45}"
-      onclick="toggleStage('${s}')">${enabled.has(s)?'✓ ':''}${s}</span>`).join("");
   const stages=Object.keys(d.stage.flags||{});
   const cur=d.stage.index;
   $("#sop-stage").innerHTML='<div class="stepper">'+stages.map((s,i)=>
@@ -67,17 +62,6 @@ $("#sop-cards").onclick=e=>{
   sopFilter=(sopFilter===c.dataset.st)?null:c.dataset.st;
   loadSop();
 };
-async function toggleStage(s){
-  const st=await api("stages",{project:PROJECT});
-  let enabled=new Set(st.enabled||[]);
-  enabled.has(s)?enabled.delete(s):enabled.add(s);
-  await fetch("/api/stages",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({project:PROJECT,enabled:[...enabled]})});
-  const el=$("#stages-saved");
-  el.textContent="已自动保存 ✓";
-  setTimeout(()=>{el.textContent=""},2000);
-  loadSop();
-}
 async function loadLint(btn){
   const t0=new Date().toLocaleTimeString();
   if(btn){btn.disabled=true;btn.textContent="检查中…";}

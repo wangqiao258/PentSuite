@@ -17,7 +17,7 @@ AI 落库与聚合、人看面板与审核的渗透测试**单一项目**。三�
 PentSuite/
 ├─ pentdb/                 套件运行时（内部全部 __file__ 相对寻址，可整体搬移）
 │  ├─ pentdb.py            CLI：init/panel/add/exec/lifecycle/query/review/lint/rebuild-assets/sop/waive/
-│  │                       migrate/report/drop/evidence/verify/stages/recon/js/serve
+│  │                       migrate/report/drop/evidence/verify/recon/js/serve
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；七视图全交互联动）
 │  │                       web/ 三文件：index.html + style.css + app.js（server.py 白名单静态路由）

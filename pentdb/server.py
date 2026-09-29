@@ -215,16 +215,6 @@ class Handler(BaseHTTPRequestHandler):
                 p = q.get("project", [""])[0]
                 import pentdb
                 self._json(pentdb.sop_report(c, p))
-            elif u.path == "/api/stages":
-                p = q.get("project", [""])[0]
-                import pentdb
-                if not c.execute("SELECT 1 FROM projects WHERE name=?", (p,)).fetchone():
-                    return self._json({"error": "project not found"}, 404)
-                all_stages = pentdb.load_sop_cfg().get("stages", [])
-                prow = c.execute("SELECT stages_enabled FROM projects WHERE name=?", (p,)).fetchone()
-                enabled = [s.strip() for s in (prow["stages_enabled"] or "").split(",") if s.strip()]
-                self._json({"all": all_stages, "enabled": enabled or all_stages,
-                            "custom": bool(enabled)})
             elif u.path == "/api/suggestions":
                 p = q.get("project", [""])[0]
                 rows = rows_to_dicts(c.execute(
@@ -380,27 +370,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "id": row["id"] if row else None})
             finally:
                 c2.close()
-        if u.path == "/api/stages":
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
-            import datetime
-            c = db()
-            try:
-                if not c.execute("SELECT 1 FROM projects WHERE name=?", (data.get("project"),)).fetchone():
-                    return self._json({"error": "project not found"}, 404)
-                import pentdb
-                all_stages = pentdb.load_sop_cfg().get("stages", [])
-                enabled = [s for s in data.get("enabled", []) if s in all_stages]
-                now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-                c.execute("UPDATE projects SET stages_enabled=? WHERE name=?",
-                          (",".join(enabled), data["project"]))
-                c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
-                          (data["project"], "stages",
-                           "启用阶段: " + ("、".join(enabled) if enabled else "全部") + "（面板）", now))
-                c.commit()
-                return self._json({"ok": True, "enabled": enabled or all_stages})
-            finally:
-                c.close()
         if u.path != "/api/review":
             return self._json({"error": "not found"}, 404)
         n = int(self.headers.get("Content-Length", 0))

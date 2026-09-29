@@ -1083,10 +1083,8 @@ def _hints_menu(cfg):
 
 def sop_report(c, project):
     cfg = load_sop_cfg()
-    prow = c.execute("SELECT stages_enabled FROM projects WHERE name=?", (project,)).fetchone()
-    enabled = [s.strip() for s in (prow["stages_enabled"] or "").split(",") if s.strip()]
     stages_all = cfg.get("stages", [])
-    stages = [s for s in stages_all if not enabled or s in enabled]
+    stages = list(stages_all)
     menu_map = _hints_menu(cfg)
 
     tests = [dict(r) for r in c.execute(
@@ -1169,7 +1167,7 @@ def sop_report(c, project):
                         for p in pend_rows if (p["stage"] or "") == s],
         })
 
-    # 当前阶段判定：菜单全部 done/waived 视为走完（仅展示参考，不拦截任何动作）
+    # 当前阶段判定：菜单全部已测视为走完（仅展示参考，不拦截任何动作）
     flags = [v["complete"] for v in stage_view if v["menu"]]
     cur = len(stages)
     for i, ok in enumerate(flags):
@@ -1178,7 +1176,7 @@ def sop_report(c, project):
             break
     stage = {"current": stages[cur] if cur < len(stages) else "(全部完成)",
              "index": cur, "total": len(stages), "flags": dict(zip(stages, flags))}
-    return {"stage": stage, "stages_all": stages_all, "stages_enabled": stages,
+    return {"stage": stage, "stages_all": stages_all,
             "stage_view": stage_view, "total": total, "done": done,
             "registered": registered, "missing": missing}
 
@@ -1446,26 +1444,6 @@ def cmd_lifecycle(a):
     print(f"[ok] #{a.id} 生命周期 → {a.code}")
 
 
-def cmd_stages(a):
-    """查看/设置本项目启用的 SOP 阶段（空=全部启用）。"""
-    c = connect()
-    require_project(c, a.project)
-    all_stages = load_sop_cfg().get("stages", [])
-    prow = c.execute("SELECT stages_enabled FROM projects WHERE name=?", (a.project,)).fetchone()
-    enabled = [s.strip() for s in (prow["stages_enabled"] or "").split(",") if s.strip()]
-    if a.enable:
-        req = [s.strip() for s in a.enable.split(",") if s.strip()]
-        bad = [s for s in req if s not in all_stages]
-        if bad:
-            sys.exit(f"[x] 未知阶段: {'、'.join(bad)}；可选: {'/'.join(all_stages)}")
-        c.execute("UPDATE projects SET stages_enabled=? WHERE name=?", (",".join(req), a.project))
-        log_change(c, a.project, "stages", f"启用阶段: {'、'.join(req)}")
-        c.commit()
-        enabled = req
-        print(f"[ok] 启用阶段已更新: {'、'.join(req)}")
-    print(f"-- 当前启用（{'自定义' if enabled else '全部'}）: {' / '.join(enabled or all_stages)}")
-
-
 def cmd_drop(a):
     """删除整个项目及其数据（高危操作，必须 --confirm）。changelog 留墓碑记录。"""
     if not a.confirm:
@@ -1630,11 +1608,6 @@ def main():
     sp.add_argument("--code", required=True, choices=LIFE_CODES)
     sp.add_argument("--note", default="", help="结论说明（进 changelog）")
     sp.set_defaults(fn=cmd_lifecycle)
-
-    sp = sub.add_parser("stages")
-    sp.add_argument("--project", required=True)
-    sp.add_argument("--enable", default="", help="逗号分隔的启用阶段列表（缺省仅查看）")
-    sp.set_defaults(fn=cmd_stages)
 
     sp = sub.add_parser("recon")
     sp.add_argument("--project", required=True)
