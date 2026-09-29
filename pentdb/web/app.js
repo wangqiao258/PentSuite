@@ -17,7 +17,7 @@ async function boot(){
 }
 function loadAll(){loadOverview();loadSop();loadLint();loadFindings();loadAssets();loadTimeline();loadReview();loadReport()}
 
-const ST_TXT={done:"✓ 已测",registered:"◐ 已登记",missing:"○ 未登记",waived:"⊘ 已豁免"};
+const ST_TXT={done:"✓ 已测",registered:"◐ 已登记",missing:"○ 未测(提示)",waived:"⊘ 已豁免"};
 let sopFilter=null;
 async function loadSop(){
   const d=await api("sop",{project:PROJECT});
@@ -37,36 +37,22 @@ async function loadSop(){
      `<b style="color:${ST_COLOR[st]||""}">${n}</b><span>${label}${sopFilter===st?" ●":""}</span></div>`
     :`<div class="card"><b>${n}</b><span>${label}</span></div>`;
   $("#sop-cards").innerHTML=
-    sc(d.total,"必测项","")+sc(d.done,"✓ 已测","done")+
-    sc(d.registered,"◐ 已登记","registered")+sc(d.missing,"○ 未登记","missing")+
+    sc(d.total,"提示项","")+sc(d.done,"✓ 已测","done")+
+    sc(d.registered,"◐ 已登记","registered")+sc(d.missing,"○ 未测","missing")+
     sc(d.waived,"⊘ 已豁免","waived");
-  const per=d.per||{};
-  const ids=Object.keys(per).sort((a,b)=>parseInt(a)-parseInt(b));
-  $("#sop-per").innerHTML=ids.map(rid=>{
-    const r=per[rid];
-    const items=sopFilter?r.items.filter(it=>it.state===sopFilter):r.items;
-    if(sopFilter&&!items.length)return "";
-    const itemHtml=items.map(it=>{
-      let html=`<span class="sopitem st-${it.state}">${ST_TXT[it.state]} ${it.stage?esc(it.stage)+"：":""}${esc(it.term)}`;
-      if(it.state==="missing"||it.state==="registered")
-        html+=`<button onclick="doWaive(${rid},'${esc(it.term).replace(/'/g,"&#39;")}')">豁免</button>`;
-      return html+`</span>`;
-    }).join("");
-    return `<div class="rec"><div class="hd"><b>#${rid}</b> ${kindTag(r.kind)} ${esc(r.label)} `+
-      `<span class="muted">${r.done+r.waived}/${r.total} 完成</span></div><div>${itemHtml}</div></div>`;
-  }).join("")||(sopFilter?"<div class='muted'>当前状态过滤下无记录</div>":"<div class='muted'>当前没有命中必测规则的记录（规则匹配 kind: domain/port/path/param/finding）</div>");
   // 阶段视图：计划（菜单）× 执行（test 流水）；状态过滤时只留含匹配项的阶段
   const SV_TXT={done:"✓",registered:"◐",missing:"○",waived:"⊘"};
   $("#stage-view").innerHTML=(d.stage_view||[]).filter(v=>
     !sopFilter||v.menu.some(it=>it.state===sopFilter)).map(v=>{
     const menuItems=sopFilter?v.menu.filter(it=>it.state===sopFilter):v.menu;
     const menu=menuItems.map(it=>{
-      let h=`<span class="sopitem st-${it.state}" title="${ST_TXT[it.state]}">${SV_TXT[it.state]} ${esc(it.term)}`;
+      let h=`<span class="sopitem st-${it.state}" title="${ST_TXT[it.state]}${it.when?"："+it.when:""}（提示层，非门禁）">${SV_TXT[it.state]} ${esc(it.term)}`;
+      if(it.state==="missing"&&it.when)h+=` <span class="muted">${esc(it.when)}</span>`;
       if(it.state==="done"&&it.ev)h+=` <span class="muted">${it.ev}</span>`;
       if(it.state==="missing"||it.state==="registered")
         h+=`<button onclick="doWaive(0,'${esc(it.term).replace(/'/g,"&#39;")}')">豁免</button>`;
       return h+`</span>`;
-    }).join("")||"<span class='muted'>该阶段未定义必测菜单</span>";
+    }).join("")||"<span class='muted'>该阶段无提示项</span>";
     const exe=v.executed.length?v.executed.map(t=>
       `<div class="rec"><div class="hd"><b>#${t.id}</b> ${esc(t.value)} ${tag(t.status)} `+
       `<span class="muted">${t.created_at}</span></div>`+
@@ -369,8 +355,6 @@ async function loadEvidencePanel(f,rel){
       const reqCls=!g.req?"hidden":"", respCls=(g.req||!g.resp)?"hidden":"";
       return `<div class="pkt-card">`+
         `<div class="hd"><b>第 ${i+1} 组</b><span class="muted">挂 #${hdr.event_id} · ${hdr.created_at} · sha256 ${(hdr.sha256||"").slice(0,16)}…</span>`+
-        (g.req?` <a href="/api/evidence/download?id=${g.req.id}"><button class="mini">下载请求</button></a>`:"")+
-        (g.resp?` <a href="/api/evidence/download?id=${g.resp.id}"><button class="mini">下载响应</button></a>`:"")+
         `</div>`+
         (g.req&&g.resp?`<div class="pkt-tabs"><span class="pkt-tab on" data-pkt="req">请求</span><span class="pkt-tab" data-pkt="resp">响应</span></div>`:"")+
         `<pre data-side="req" id="pkt-req-${i}" class="${reqCls}">${g.req?"加载中…":"（该组无请求报文）"}</pre>`+
@@ -391,7 +375,7 @@ async function loadEvidencePanel(f,rel){
       const name=e.note||e.path.split(/[\\/]/).pop();
       return `<div class="rec"><div class="hd"><b>${esc(name)}</b>`+
         ` <span class="tag t-kind">挂 #${e.event_id}</span>`+
-        (e.exists?` <button class="mini" data-ev="${e.id}">查看</button> <a href="/api/evidence/download?id=${e.id}"><button class="mini">下载</button></a>`
+        (e.exists?` <button class="mini" data-ev="${e.id}">查看</button>`
                  :` <span class="tag sev-crit">文件缺失</span>`)+
         `<div class="src" title="${esc(e.path)}">${esc(e.path)} ｜ sha256 ${(e.sha256||"").slice(0,16)}… ｜ ${e.created_at}</div></div>`+
         `<pre class="hidden" id="evc-${e.id}"></pre></div>`;
@@ -407,7 +391,7 @@ async function loadProjectEvidence(){
   box.className=evs.length?"":"muted";
   box.innerHTML=evs.length?evs.map(e=>
     `<div class="rec"><div class="hd"><b>${esc(e.note||e.path.split(/[\\/]/).pop())}</b>`+
-    (e.exists?` <button class="mini" data-ev="${e.id}">查看</button> <a href="/api/evidence/download?id=${e.id}"><button class="mini">下载</button></a>`
+    (e.exists?` <button class="mini" data-ev="${e.id}">查看</button>`
              :` <span class="tag sev-crit">文件缺失</span>`)+
     `<div class="src">${esc(e.path)} ｜ ${e.created_at}</div></div>`+
     `<pre class="hidden" id="evc-${e.id}"></pre></div>`).join("")
@@ -435,7 +419,7 @@ $("#finding-detail").addEventListener("click",async e=>{
     const r=await fetch("/api/evidence/view?id="+ev.dataset.ev);
     const d=await r.json();
     if(!r.ok){pre.textContent="读取失败: "+(d.error||r.status);pre.classList.remove("hidden");return;}
-    pre.textContent=d.binary?"（二进制内容，请下载查看）":d.content;
+    pre.textContent=d.binary?"（二进制内容，请按上方路径在资源管理器打开）":d.content;
     pre.classList.remove("hidden");return;
   }
 });
@@ -564,9 +548,9 @@ async function renderAssetDetail(){
 async function loadTimeline(){
   const d=await api("timeline",{project:PROJECT});
   $("#tl-events").innerHTML="<tr><th>时间</th><th>类型</th><th>值</th><th>状态</th><th>来源</th></tr>"+
-    d.events.map(r=>`<tr><td class="muted">${r.created_at}</td><td>${kindTag(r.kind)}</td><td>${esc(r.value)}</td><td>${tag(r.status)}</td><td class="src">${esc(r.source).slice(0,90)}</td></tr>`).join("");
+    d.events.map(r=>`<tr><td class="muted" title="${esc(r.created_at)}">${r.created_at}</td><td>${kindTag(r.kind)}</td><td title="${esc(r.value)}">${esc(r.value)}</td><td>${tag(r.status)}</td><td class="src muted" title="${esc(r.source)}">${esc(r.source).slice(0,90)}</td></tr>`).join("");
   $("#tl-changes").innerHTML="<tr><th>时间</th><th>动作</th><th>明细</th></tr>"+
-    d.changes.map(r=>`<tr><td class="muted">${r.at}</td><td>${esc(r.action)}</td><td>${esc(r.detail)}</td></tr>`).join("");
+    d.changes.map(r=>`<tr><td class="muted" title="${esc(r.at)}">${r.at}</td><td title="${esc(r.action)}">${esc(r.action)}</td><td title="${esc(r.detail)}">${esc(r.detail).slice(0,120)||"—"}</td></tr>`).join("");
 }
 
 function srcGroup(s){
@@ -578,32 +562,46 @@ function srcGroup(s){
 async function loadReview(){
   const d=await api("pending",{project:PROJECT});
   const items=d.pending||[];
-  const groups={};
-  items.forEach(r=>{const k=srcGroup(r.source);(groups[k]=groups[k]||[]).push(r)});
   if(!items.length){$("#review-table").innerHTML="<tr><td colspan=\"7\">队列已清空，全部处理完毕</td></tr>";updBatch();return;}
+  // 成熟 inbox 模式：队列=决策面。同值已有 confirmed 的重复嫌疑剔除出正队列、置底默认折叠；
+  // 展开只渲染判据卡（备注全文+同值历史），报文/证据在详情页唯一渲染，队列跳转过去。
+  const fresh=items.filter(r=>!(r.dup_confirmed>0)), dup=items.filter(r=>r.dup_confirmed>0);
+  const groups={};
+  fresh.forEach(r=>{const k=srcGroup(r.source);(groups[k]=groups[k]||[]).push(r)});
   let html="<thead><tr><th style=\"width:32px\"></th><th style=\"width:56px\">ID</th><th style=\"width:64px\">类型</th>"+
-    "<th>值</th><th style=\"width:24%\">备注（点行展开证据）</th><th style=\"width:96px\">属性</th><th style=\"width:128px\">操作</th></tr></thead><tbody>";
+    "<th>值</th><th style=\"width:24%\">备注（点行展开判据卡）</th><th style=\"width:96px\">属性</th><th style=\"width:128px\">操作</th></tr></thead><tbody>";
   Object.keys(groups).sort((a,b)=>groups[b].length-groups[a].length).forEach((src,gi)=>{
-    const g=groups[src];
+    const g=groups[src], gname="g"+gi;
     html+=`<tr style="background:var(--gray-bg)"><td colspan="7"><b>${esc(src)}</b> `+
       `<span class="muted">× ${g.length}</span>`+
-      ` <label class="muted" style="margin-left:10px"><input type="checkbox" onchange="tgGroup(${gi},this.checked)"> 全选本组</label></td></tr>`;
-    g.forEach(r=>{
-      const attr=`${r.origin||""}${r.confidence?"/"+r.confidence:""}`;
-      html+=`<tr class="rv-row" onclick="tgDetail(${r.id},this)">`+
-        `<td onclick="event.stopPropagation()"><input type="checkbox" class="rv-check" data-g="g${gi}" data-id="${r.id}" onchange="updBatch()"></td>`+
-        `<td class="ell muted">#${r.id}</td>`+
-        `<td>${kindTag(r.kind)}</td>`+
-        `<td class="ell" title="${esc(r.value)}"><b>${esc(r.value)}</b></td>`+
-        `<td class="ell muted" title="${esc(r.note)}">${esc(r.note).slice(0,50)||"—"}</td>`+
-        `<td class="ell muted" title="${esc(attr)}">${esc(attr)}</td>`+
-        `<td onclick="event.stopPropagation()"><button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button></td></tr>`+
-        `<tr class="rv-detail hidden" data-did="${r.id}" data-q="${esc(r.value)}" data-note="${esc(r.note)}"><td colspan="7">`+
-        `<div class="rv-inner"><span class='muted'>点行展开：备注全文 + 证据物料 + 同值观测</span></div></td></tr>`;
-    });
+      ` <label class="muted" style="margin-left:10px"><input type="checkbox" onchange="tgGroup('${gname}',this.checked)"> 全选本组</label>`+
+      ` <button class="mini" onclick="doGroup('${gname}','confirmed')">整组确认</button>`+
+      ` <button class="mini" onclick="doGroup('${gname}','rejected')">整组驳回</button></td></tr>`;
+    g.forEach(r=>{html+=rvRowHtml(r,gname)});
   });
+  if(dup.length){
+    html+=`<tr style="background:var(--gray-bg)"><td colspan="7"><b>重复嫌疑（同值已有已确认记录）</b> `+
+      `<span class="muted">× ${dup.length} · 默认建议驳回或合并到已有记录</span>`+
+      ` <label class="muted" style="margin-left:10px"><input type="checkbox" onchange="tgGroup('gdup',this.checked)"> 全选本组</label>`+
+      ` <button class="mini" onclick="doGroup('gdup','rejected')">整组驳回</button></td></tr>`;
+    dup.forEach(r=>{html+=rvRowHtml(r,"gdup",r.dup_confirmed)});
+  }
   $("#review-table").innerHTML=html+"</tbody>";
   updBatch();
+}
+function rvRowHtml(r,gname,dupN){
+  const attr=`${r.origin||""}${r.confidence?"/"+r.confidence:""}`;
+  const badge=dupN?`<span class="tag" style="background:#FAC775;color:#412402">同值已有 confirmed ×${dupN}</span> `:"";
+  return `<tr class="rv-row" onclick="tgDetail(${r.id},this)">`+
+    `<td onclick="event.stopPropagation()"><input type="checkbox" class="rv-check" data-g="${gname}" data-id="${r.id}" onchange="updBatch()"></td>`+
+    `<td class="ell muted">#${r.id}</td>`+
+    `<td>${kindTag(r.kind)}</td>`+
+    `<td class="ell" title="${esc(r.value)}"><b>${esc(r.value)}</b></td>`+
+    `<td class="ell muted" title="${esc(r.note)}">${badge}${esc((r.note||"").slice(0,50))||"—"}</td>`+
+    `<td class="ell muted" title="${esc(attr)}">${esc(attr)}</td>`+
+    `<td onclick="event.stopPropagation()"><button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button></td></tr>`+
+    `<tr class="rv-detail hidden" data-did="${r.id}" data-q="${esc(r.value)}" data-note="${esc(r.note)}" data-kind="${esc(r.kind)}"><td colspan="7">`+
+    `<div class="rv-inner"><span class='muted'>点行展开：判据卡（备注全文 + 同值历史 + 跳详情）</span></div></td></tr>`;
 }
 async function tgDetail(id,tr){
   const d=document.querySelector(`#review-table tr.rv-detail[data-did="${id}"]`);
@@ -614,64 +612,55 @@ async function tgDetail(id,tr){
   if(!opening||d.dataset.loaded)return;   // 收起或已加载过：不再请求
   d.dataset.loaded="1";
   const box=d.querySelector(".rv-inner");
-  box.innerHTML="<span class='muted'>加载证据与同值观测…</span>";
+  box.innerHTML="<span class='muted'>加载同值历史…</span>";
   try{
-    const evd=await api("evidence",{project:PROJECT,event_ids:id});
-    const evs=(evd.evidence||[]).slice().sort((a,b)=>a.id-b.id);
-    let rel=[],byEv={};
     const q=d.dataset.q||"";
+    let rel=[];
     if(q){
       const rd=await api("events",{project:PROJECT,value:q});
       rel=(rd.events||[]).filter(r=>r.id!==id);
-      if(rel.length){
-        const re=await api("evidence",{project:PROJECT,event_ids:rel.map(r=>r.id).join(",")});
-        (re.evidence||[]).forEach(e=>{(byEv[e.event_id]=byEv[e.event_id]||[]).push(e)});
-      }
     }
-    box.innerHTML=rvDetailHtml(d.dataset.note||"",evs,rel,byEv);
+    box.innerHTML=rvJudgeHtml(id,d.dataset.note||"",rel,q);
   }catch(err){d.dataset.loaded="";box.innerHTML="<span class='muted'>加载失败: "+esc(err.message)+"（再点行重试）</span>";}
 }
-$("#review-table").addEventListener("click",async e=>{
-  const ev=e.target.closest("[data-ev]"); if(!ev)return;
-  const pre=$("#evc-"+ev.dataset.ev); if(!pre)return;
-  if(!pre.classList.contains("hidden")){pre.classList.add("hidden");return;}
-  try{
-    const r=await fetch("/api/evidence/view?id="+ev.dataset.ev);
-    const v=await r.json();
-    pre.textContent=r.ok?(v.binary?"（二进制内容，请下载查看）":v.content):("读取失败: "+(v.error||r.status));
-  }catch(err){pre.textContent="读取失败: "+err.message;}
-  pre.classList.remove("hidden");
-});
-const rvIsReq=e=>e.etype==="request"||(e.note||"").startsWith("request");
-const rvIsResp=e=>e.etype==="response"||(e.note||"").startsWith("response");
-function rvEvCard(e){
-  const name=rvIsReq(e)?"请求报文":rvIsResp(e)?"响应报文":(e.note||e.path.split(/[\\/]/).pop());
-  return `<div class="rec"><div class="hd"><b>${esc(name)}</b> <span class="tag t-kind">挂 #${e.event_id}</span>`+
-    (e.exists?` <button class="mini" data-ev="${e.id}">查看</button> <a href="/api/evidence/download?id=${e.id}"><button class="mini">下载</button></a>`
-             :` <span class="tag sev-crit">文件缺失</span>`)+
-    `<div class="src" title="${esc(e.path)}">${esc(e.path)} ｜ sha256 ${(e.sha256||"").slice(0,16)}… ｜ ${e.created_at}</div></div>`+
-    `<pre class="hidden" id="evc-${e.id}"></pre></div>`;
-}
-function rvDetailHtml(note,evs,rel,byEv){
+function rvJudgeHtml(id,note,rel,q){
+  const by={}; rel.forEach(r=>{(by[r.status]=by[r.status]||[]).push(r)});
+  const cnt=`已确认 ${(by.confirmed||[]).length} · 已驳回 ${(by.rejected||[]).length} · 其他待审 ${(by.new||[]).length}`;
   let h=`<div class="muted" style="margin-bottom:4px"><b>备注全文</b></div>`+
     `<div style="white-space:pre-wrap;margin-bottom:8px">${esc(note)||"<span class='muted'>（无备注）</span>"}</div>`;
-  h+=`<div class="muted" style="margin-bottom:4px"><b>证据物料</b>（该记录挂载的报文/附件——审的就是这些）</div>`;
-  h+=evs.length?evs.map(rvEvCard).join("")
-    :`<div class="muted" style="margin-bottom:8px">无挂载证据（add --req/--resp 或 evidence 落库后在此展示；项目级物料在「发现·漏洞」页顶部「项目物料」）</div>`;
-  h+=`<div class="muted" style="margin:6px 0 4px"><b>同值观测</b>（库内同 value 的其他记录：看历史、归因与佐证）</div>`;
-  h+=rel.length?rel.map(r=>{
-    const ev=byEv[r.id]||[];
-    return `<div class="rec"><div class="hd"><b>#${r.id}</b> ${kindTag(r.kind)} <b>${esc(r.value)}</b> ${tag(r.status)}`+
-      ` <span class="muted">${(r.created_at||"").slice(0,10)} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span>`+
-      (ev.length?` <span class="tag t-kind">证据 ×${ev.length}</span>`:"")+`</div>`+
+  h+=`<div class="muted" style="margin-bottom:4px"><b>同值历史</b>（${esc(q)} · 共 ${rel.length} 条：${cnt}）</div>`;
+  h+=rel.length?rel.slice(0,8).map(r=>
+      `<div class="rec"><div class="hd"><b>#${r.id}</b> ${kindTag(r.kind)} ${tag(r.status)}`+
+      ` <span class="muted">${(r.created_at||"").slice(0,10)} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span></div>`+
       (r.note?`<div class="muted">${esc(r.note)}</div>`:"")+
-      `<div class="src">来源: ${esc(r.source)}</div></div>`;
-  }).join(""):`<div class="muted">无同值观测</div>`;
+      `<div class="src">来源: ${esc(r.source)}</div></div>`).join("")+
+    (rel.length>8?`<div class="muted">…其余 ${rel.length-8} 条略，完整历史见实体/详情页</div>`:"")
+    :`<div class="muted">无同值历史（库内首见）</div>`;
+  h+=`<div style="margin-top:8px"><span class="muted">报文/证据在详情页唯一渲染：</span> `+
+    `<button class="mini" onclick="gotoQueueDetail(${id})">在详情页打开</button></div>`;
   return h;
 }
-function tgGroup(gi,on){
-  document.querySelectorAll(`#review-table input.rv-check[data-g="g${gi}"]`).forEach(c=>c.checked=on);
+function gotoQueueDetail(id){
+  const d=document.querySelector(`#review-table tr.rv-detail[data-did="${id}"]`); if(!d)return;
+  const kind=d.dataset.kind||"", q=d.dataset.q||"";
+  if(kind==="finding"||kind==="osint"){selFinding=id;switchTab("findings");loadFindings();}
+  else gotoAssets(kind,"",q);
+}
+function tgGroup(g,on){
+  document.querySelectorAll(`#review-table input.rv-check[data-g="${g}"]`).forEach(c=>c.checked=on);
   updBatch();
+}
+async function doGroup(gname,action){
+  const ids=[...document.querySelectorAll(`#review-table input.rv-check[data-g="${gname}"]`)].map(c=>+c.dataset.id);
+  if(!ids.length)return;
+  let note=$("#batch-note").value.trim();
+  if(!note)note=prompt(`整组${action==="confirmed"?"确认":"驳回"} ${ids.length} 条 — 批注（写入每条留痕）：`,"")||"";
+  if(!note){alert("批量操作必须留批注");return;}
+  if(!confirm(`确定${action==="confirmed"?"确认":"驳回"} ${ids.length} 条？`))return;
+  const r=await fetch("/api/review",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({ids,action,note})});
+  if(!r.ok){alert(await r.text());return;}
+  loadAll();
 }
 function updBatch(){
   const n=document.querySelectorAll("#review-table input.rv-check:checked").length;

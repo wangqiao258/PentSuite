@@ -251,6 +251,20 @@ class Handler(BaseHTTPRequestHandler):
                 p = q.get("project", [""])[0]
                 rows = rows_to_dicts(c.execute(
                     "SELECT * FROM raw_events WHERE project=? AND status='new' ORDER BY id", (p,)))
+                # 去重前置：同值已有 confirmed/rejected 的条目在队列里直接打标（成熟 inbox 模式）
+                vals = sorted({r["value"] for r in rows if r["value"]})
+                stat = {}
+                if vals:
+                    ph = ",".join("?" * len(vals))
+                    for r in c.execute(
+                            "SELECT value, status, COUNT(*) AS n FROM raw_events "
+                            f"WHERE project=? AND value IN ({ph}) AND status!='new' "
+                            "GROUP BY value, status", (p, *vals)):
+                        stat.setdefault(r["value"], {})[r["status"]] = r["n"]
+                for r in rows:
+                    s = stat.get(r["value"], {})
+                    r["dup_confirmed"] = s.get("confirmed", 0)
+                    r["dup_rejected"] = s.get("rejected", 0)
                 self._json({"pending": rows})
             elif u.path == "/api/report":
                 p = q.get("project", [""])[0]
@@ -282,21 +296,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
-        if u.path == "/api/evidence/download":
-            eid = int(q.get("id", ["0"])[0])
-            row = c.execute("SELECT * FROM evidence WHERE id=?", (eid,)).fetchone()
-            if not row or not os.path.exists(row["path"]):
-                return self._json({"error": "no evidence file"}, 404)
-            with open(row["path"], "rb") as f:
-                body = f.read()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Disposition",
-                             f"attachment; filename={os.path.basename(row['path'])}")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if u.path == "/api/retest":
             n = int(self.headers.get("Content-Length", 0))
             data = json.loads(self.rfile.read(n).decode("utf-8"))

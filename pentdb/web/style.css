@@ -99,6 +99,15 @@
   tr.on td{background:var(--bg);box-shadow:inset 3px 0 0 var(--purple)}
   .arow{cursor:pointer}
   #review-table{table-layout:fixed}
+  #tl-events,#tl-changes{table-layout:fixed}
+  #tl-events th:nth-child(1),#tl-changes th:nth-child(1){width:150px}
+  #tl-events th:nth-child(2){width:64px}
+  #tl-events th:nth-child(3){width:auto}
+  #tl-events th:nth-child(4){width:80px}
+  #tl-events th:nth-child(5){width:220px}
+  #tl-changes th:nth-child(2){width:140px}
+  #tl-events td,#tl-changes td{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;word-break:break-all}
+  #tl-events td:nth-child(1),#tl-changes td:nth-child(1){white-space:nowrap}
   #review-table td.ell{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   #review-table .rv-row{cursor:pointer}
   #review-table .rv-detail>td{background:var(--bg);border-bottom:2px solid var(--line)}

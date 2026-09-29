@@ -16,7 +16,7 @@
 </header>
 <div class="tabs">
   <button data-v="overview" class="on">目标总览</button>
-  <button data-v="sop">SOP 覆盖</button>
+  <button data-v="sop">SOP 提示</button>
   <button data-v="findings">发现·漏洞</button>
   <button data-v="assets">资产明细</button>
   <button data-v="timeline">时间线</button>
@@ -31,13 +31,12 @@
   </section>
   <section id="v-sop" class="hidden">
     <div class="panel"><h3>Lint 门禁（收尾要求 0 error）<button id="lint-btn" onclick="loadLint(this)">重新检查</button><span id="lint-sum" style="margin-left:10px"></span><span id="lint-at" class="muted" style="margin-left:8px"></span><span class="muted" style="margin-left:8px">只扫数据质量（溯源/合法性/归因），不执行测试</span></h3><div id="lint-out" class="muted">…</div></div>
-    <div class="panel"><h3>阶段进度（点击阶段名开/关，自动保存即时生效；类目规则在 sop/default.json 走 git）<span id="stages-saved" class="muted" style="margin-left:10px;color:var(--teal)"></span></h3>
+    <div class="panel"><h3>阶段进度（点击阶段名开/关，自动保存即时生效；提示清单在 sop/default.json 走 git）<span id="stages-saved" class="muted" style="margin-left:10px;color:var(--teal)"></span></h3>
       <div class="stepper" id="stage-toggles" style="margin-bottom:8px"></div>
       <div class="stepper" id="sop-stage"></div></div>
     <div class="cards" id="sop-cards"></div>
-    <div class="muted" style="margin:-6px 0 12px">点状态卡可只看该状态（○未登记=待处置清单 ｜ ⊘已豁免=豁免清单），再点取消；卡片计数始终为全量</div>
-    <div class="panel"><h3>阶段视图（计划 = 该阶段必测菜单 + 规则映射；执行 = 该阶段 test 流水；AI 落库时 add --kind test --stage 阶段名）</h3><div id="stage-view"></div></div>
-    <div class="panel"><h3>逐记录必测覆盖（未登记/已登记项可豁免，豁免必填理由留痕）</h3><div id="sop-per"></div></div>
+    <div class="muted" style="margin:-6px 0 12px">SOP 是给 AI 的查漏补缺提示（非门禁）：按 when 语义命中才对照 check，未测项可豁免留痕或由 AI 申报不适用；点状态卡可只看该状态，再点取消</div>
+    <div class="panel"><h3>提示清单（when 触发语义 + check 提示术语；执行 = 该阶段 test 流水；AI 落库时 add --kind test --stage 阶段名）</h3><div id="stage-view"></div></div>
   </section>
   <section id="v-findings" class="hidden">
     <details class="panel"><summary style="cursor:pointer"><span style="font-size:13px;color:var(--tx2)">项目物料（凭据表 / 原始报告 / 访问说明 —— 项目级，不属于单个漏洞）</span></summary>
@@ -86,8 +85,8 @@
     <div class="panel"><h3>实体观测下钻（点击资产行展开该实体的全部原始观测；观测即 raw_events，人审在「待审队列」做）</h3><div id="asset-detail" class="muted">← 点击资产行下钻原始观测</div></div>
   </section>
   <section id="v-timeline" class="hidden">
-    <div class="panel"><h3>最近事件（倒序，最多 100 条）</h3><table id="tl-events"></table></div>
-    <div class="panel"><h3>库操作留痕（changelog）</h3><table id="tl-changes"></table></div>
+    <div class="panel" style="overflow-x:auto"><h3>最近事件（倒序，最多 100 条）</h3><table id="tl-events"></table></div>
+    <div class="panel" style="overflow-x:auto"><h3>库操作留痕（changelog）</h3><table id="tl-changes"></table></div>
   </section>
   <section id="v-review" class="hidden">
     <div class="panel" id="batch-bar" style="display:none">
@@ -97,7 +96,7 @@
         <button class="btn-no" onclick="doBatch('rejected')">驳回所选</button>
       </h3>
     </div>
-    <div class="panel"><h3>AI 推断与待确认项 —— 按来源分组（待审项天然成批），逐条或勾选批量处理；点行展开备注全文 + 证据物料 + 同值观测；批量必须留批注；驳回即回滚视图、原始证据保留</h3><table id="review-table"></table></div>
+    <div class="panel"><h3>AI 推断与待确认项 —— 队列只做判定：按来源分组、组头可整组判定（批注必填留痕）；点行展开判据卡（备注全文 + 同值历史），报文/证据在详情页唯一渲染、判据卡内一键跳转；同值已有已确认的重复嫌疑自动置底折叠，建议驳回或合并</h3><table id="review-table"></table></div>
   </section>
   <section id="v-report" class="hidden">
     <div class="panel">

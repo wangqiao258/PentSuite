@@ -21,7 +21,7 @@ PentSuite/
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；七视图全交互联动）
 │  │                       web/ 三文件：index.html + style.css + app.js（server.py 白名单静态路由）
-│  ├─ sop/default.json     SOP 必测规则（R1-R7 带 stage）+ 7 阶段 stage_required 菜单
+│  ├─ sop/default.json     SOP 提示清单（stage_hints：when 触发语义 + check 提示术语，AI 查漏补缺用）+ 7 阶段
 │  ├─ test_sop.py          核心逻辑单测（stdlib unittest）
 │  ├─ test_assets.py       资产实体层单测（key 规范化/归并/聚合语义）
 │  ├─ kb/                  经验层单元（pentest-kb，Supabase 云端，强制脱敏）
@@ -44,7 +44,7 @@ PentSuite/
 - 状态机 `new →(人审)→ confirmed/rejected`；报告与攻击建议只引用 confirmed；实体的"有待审/已确认/已驳回"是其观测的人审聚合，与生命周期互相独立（对应成熟产品的归属态/人审态分离）
 - finding detail 七段约定：`【描述】【请求】【payload】【判据】【原因】【手工验证】【修复】`——【请求】是**测试用例（构造物）**，未实测须标"待验证"；**事实数据包 = evidence 的 request/response 对**（`add --kind finding --req/--resp` **写入口强制**，无报文直接拒绝；豁免走 `--waive-capture` 起草 + 人工 `waive --wid N --confirm` 确认；lint 兜底：漏洞无 req/resp 证据=error）。【判据】=基线 vs 复现的判定标准。test 事件 **value=动作、note=结论**
 - 物料归属三层：**项目级**（凭据表/报告/访问说明，`evidence --event-id 0`）｜**finding 级**（该漏洞自己的 req/resp 证据）｜**实体级**（资产实体层聚合观测）。归属判定=复测时必须用到；认证依赖禁止虚构
-- `evidence`：证据随库走——文件默认复制进 `data/evidence/<project>/`（--keep-in-place 只存指针；`--text` 直存请求/响应原文），库内存路径+SHA256+**etype**（request/response/file，按 note 前缀自动落，面板按类型渲染）；详情页可查看/下载，报告自动附证据清单
+- `evidence`：证据随库走——文件默认复制进 `data/evidence/<project>/`（--keep-in-place 只存指针；`--text` 直存请求/响应原文），库内存路径+SHA256+**etype**（request/response/file，按 note 前缀自动落，面板按类型渲染）；详情页可查看，报告自动附证据清单
 
 ## 命令速查（CLI = `python pentdb/pentdb.py`）
 
@@ -62,7 +62,7 @@ PentSuite/
 | 证据 | `evidence --project P --event-id N --path F`（默认复制进套件；`--text` 直存文本；`--event-id 0`=项目级物料）；`evidence-move --id N --event-id M` 改挂归属 |
 | AI 推断 | `add ... --confidence high\|medium\|low`（推断类禁止 confirmed，一律 new 进待审） |
 | 查询 | `query --project P [--kind][--status]` |
-| SOP | `sop --project P [--apply]`；豁免 `waive --project P --id N --term T --reason R`（起草态不生效；人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
+| SOP 提示 | `sop --project P`（查漏补缺提示清单：when 触发语义 + check 提示术语，AI 语义判断命中后对照自查；**提示层非门禁**，覆盖度由 AI 显式申报、人背书）；豁免 `waive --project P --id N --term T --reason R`（起草态不生效；人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
 | 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |
@@ -71,7 +71,7 @@ PentSuite/
 
 ## 面板七视图（全交互联动）
 
-目标总览（卡片点击跳转筛选）｜SOP 覆盖（阶段视图=计划菜单×执行流水、状态卡过滤、lint 门禁）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+下载）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看/下载）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜报告（assets/pentest 模板+整库备份）
+目标总览（卡片点击跳转筛选）｜SOP 提示（提示清单=when×check、状态卡过滤、lint 门禁）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+复制为 curl）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜报告（assets/pentest 模板+整库备份）
 
 AI 播报约定：**仅批次产生新待审项时**播报（链接+新增数+待审数+重点）；纯 --auto 批次不打扰。
 
@@ -81,7 +81,7 @@ AI 播报约定：**仅批次产生新待审项时**播报（链接+新增数+�
 python pentdb/pentdb.py init --project <目标>
 python pentdb/pentdb.py panel --project <目标>
 python pentdb/pentdb.py recon --project <目标> --domain example.com
-python pentdb/pentdb.py sop --project <目标> --apply
+python pentdb/pentdb.py sop --project <目标>
 python pentdb/pentdb.py lint --project <目标>
 python pentdb/pentdb.py report --project <目标> --template pentest --out report.md
 ```

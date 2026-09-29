@@ -3,10 +3,10 @@
 """PentDB 核心逻辑单测（stdlib unittest，零依赖）。运行：python -m unittest test_sop -v
 
 覆盖四块最易回归的纯逻辑：
-  1. 术语匹配 _term_in / _match（交替词、大小写、parent_code）
+  1. 术语匹配 _term_in / _hints_menu（交替词、大小写、提示菜单构造）
   2. add 状态机守卫（AI 推断必 new、--auto 仅限事实类、重复拒绝、--update）
   3. lint_report（source 溯源 / test 归因 / scope / severity）
-  4. sop_report 阶段视图（7 阶段菜单、test --stage 聚合、pending 术语反查回填）
+  4. sop_report 提示清单视图（7 阶段菜单、test --stage 聚合、pending 术语反查回填）
 """
 import argparse
 import os
@@ -47,12 +47,15 @@ class TermMatch(unittest.TestCase):
         self.assertTrue(pentdb._term_in("nuclei", "Nuclei scan finished"))
 
     def test_match_kind_and_contains(self):
-        rec = {"kind": "port", "service": "mysql", "note": "", "code": "3306",
-               "_parent_code": None, "value": "1.2.3.4:3306"}
-        self.assertTrue(pentdb._match(rec, {"kind": "port", "service_or_note_contains": "mysql"}))
-        self.assertFalse(pentdb._match(rec, {"kind": "port", "service_or_note_contains": "tomcat"}))
-        self.assertTrue(pentdb._match(rec, {"code": "3306"}))
-        self.assertTrue(pentdb._match(rec, {"value_contains": "1.2.3.4"}))
+        menu = pentdb._hints_menu(pentdb.load_sop_cfg())
+        # 漏洞探测阶段：术语去重保序（越权|IDOR 由两条 when 触发，只保留首次）
+        terms = [it["term"] for it in menu["漏洞探测"]]
+        self.assertEqual(terms.count("越权|IDOR"), 1)
+        self.assertEqual(terms[0], "认证与会话")
+        # 每个提示项都带 when 触发语义
+        self.assertTrue(all(it["when"] for it in menu["端口扫描"]))
+        # 菜单仍覆盖全部 7 阶段
+        self.assertEqual(len(menu), 7)
 
 
 class AddStateMachine(unittest.TestCase):
