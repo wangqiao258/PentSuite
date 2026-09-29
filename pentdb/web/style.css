@@ -51,13 +51,6 @@
   .frow.on{background:var(--bg);box-shadow:inset 3px 0 0 var(--purple)}
   .frow b{font-size:14px}
   #finding-detail h4{margin:10px 0 2px;font-size:13px;color:var(--purple);font-weight:500}
-  .stepper{display:flex;gap:6px;flex-wrap:wrap}
-  .step{padding:3px 12px;border-radius:14px;font-size:12px;background:var(--gray-bg);color:var(--tx2);border:1px solid var(--line)}
-  .step.cur{background:var(--purple-bg);color:var(--purple);font-weight:500}
-  .step.done{background:var(--teal-bg);color:var(--teal)}
-  .st-done{color:var(--teal)} .st-registered{color:var(--amber)} .st-missing{color:var(--red)} .st-waived{color:var(--tx2)}
-  .sopitem{display:inline-block;margin:2px 6px 2px 0;font-size:12px}
-  .sopitem button{font-size:11px;padding:0 6px;margin-left:4px}
   .rec{border-bottom:1px solid var(--line);padding:8px 0}
   .rec:last-child{border-bottom:none}
   .rec .hd b{font-size:13px}

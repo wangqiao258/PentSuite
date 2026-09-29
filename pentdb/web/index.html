@@ -11,31 +11,21 @@
 <header>
   <h1>PentDB 侦察面板</h1>
   <label>项目 <select id="proj"></select></label>
-  <span class="muted">阶段按目标与授权启用，在「SOP 覆盖」页勾选</span>
   <span class="muted">事实层：AI 落库 · 人审核 · 原始事件只追加</span>
 </header>
 <div class="tabs">
   <button data-v="overview" class="on">目标总览</button>
-  <button data-v="sop">SOP 提示</button>
   <button data-v="findings">发现·漏洞</button>
   <button data-v="assets">资产明细</button>
   <button data-v="timeline">时间线</button>
   <button data-v="review">待审队列</button>
-  <button data-v="report">侦察报告</button>
+  <button data-v="report">报告·收尾</button>
 </div>
 <main>
   <section id="v-overview">
     <div class="panel"><h3>AI 建议（每轮采集/测试后由 AI 生成：接下来最值得打的动作；采纳=确认，忽略=驳回）</h3><div id="sug-list"></div></div>
     <div class="cards" id="stat-cards"></div>
     <div class="panel"><h3>子域按主域聚合（确定性归并，AI 可在库内改写 merge_key 进一步归并业务系统）</h3><div id="domain-groups"></div></div>
-  </section>
-  <section id="v-sop" class="hidden">
-    <div class="panel"><h3>Lint 门禁（收尾要求 0 error）<button id="lint-btn" onclick="loadLint(this)">重新检查</button><span id="lint-sum" style="margin-left:10px"></span><span id="lint-at" class="muted" style="margin-left:8px"></span><span class="muted" style="margin-left:8px">只扫数据质量（溯源/合法性/归因），不执行测试</span></h3><div id="lint-out" class="muted">…</div></div>
-    <div class="panel"><h3>阶段进度（7 阶段骨架固定，提示适用性由 AI 按 when 语义判断）<span id="stages-saved" class="muted" style="margin-left:10px;color:var(--teal)"></span></h3>
-      <div class="stepper" id="sop-stage"></div></div>
-    <div class="cards" id="sop-cards"></div>
-    <div class="muted" style="margin:-6px 0 12px">SOP 是给 AI 的查漏补缺提示（非门禁、非义务）：按 when 语义命中才对照 check，未测项由 AI 申报不适用/原因即可，不设豁免；点状态卡可只看该状态，再点取消</div>
-    <div class="panel"><h3>提示清单（when 触发语义 + check 提示术语；执行 = 该阶段 test 流水；AI 落库时 add --kind test --stage 阶段名）</h3><div id="stage-view"></div></div>
   </section>
   <section id="v-findings" class="hidden">
     <details class="panel"><summary style="cursor:pointer"><span style="font-size:13px;color:var(--tx2)">项目物料（凭据表 / 原始报告 / 访问说明 —— 项目级，不属于单个漏洞）</span></summary>

@@ -21,7 +21,7 @@ PentSuite/
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；七视图全交互联动）
 │  │                       web/ 三文件：index.html + style.css + app.js（server.py 白名单静态路由）
-│  ├─ sop/default.json     SOP 提示清单（stage_hints：when 触发语义 + check 提示术语，AI 查漏补缺用）+ 7 阶段
+│  ├─ sop/default.json     SOP 提示清单（扁平 hints：when 触发语义 + check 提示术语，AI 查漏补缺用，无阶段）
 │  ├─ test_sop.py          核心逻辑单测（stdlib unittest）
 │  ├─ test_assets.py       资产实体层单测（key 规范化/归并/聚合语义）
 │  ├─ kb/                  经验层单元（pentest-kb，Supabase 云端，强制脱敏）
@@ -40,7 +40,7 @@ PentSuite/
 
 - `raw_events`（append-only 观测流）：kind: domain/port/path/param/finding/osint/note/test/suggestion；source 必填；AI（origin=agent）必须带 confidence 且不得置 confirmed（--auto 仅限机器事实 domain/port/path/param/test）
 - `assets`（纯派生实体层）：观测流之上的归并层，对齐成熟 ASM 产品的"观测→实体→展示"三层。按规范 akey 归并为四类实体——domain（小写 FQDN，parent=注册域）、host（IP/主机名，从 port 观测提取）、service（host:port，parent=host）、endpoint（host+path，param 并入 attrs.params 不再单独成行）；attrs 聚合端口/技术栈/服务/参数/状态码/scope；first_seen/last_seen 由 created_at/updated_at 派生。`rebuild-assets` 幂等全量重建（add/recon 后自动触发），人审聚合与生命周期（last_seen 超 30 天=stale）在面板侧实时计算，不落库
-- `pending_tests`（带 stage）/ `waives` / `reviews` / `changelog`：只追加留痕
+- `pending_tests`（legacy 空表，阶段制退役后不再写入）/ `waives` / `reviews` / `changelog`：只追加留痕
 - 状态机 `new →(人审)→ confirmed/rejected`；报告与攻击建议只引用 confirmed；实体的"有待审/已确认/已驳回"是其观测的人审聚合，与生命周期互相独立（对应成熟产品的归属态/人审态分离）
 - finding detail 七段约定：`【描述】【请求】【payload】【判据】【原因】【手工验证】【修复】`——【请求】是**测试用例（构造物）**，未实测须标"待验证"；**事实数据包 = evidence 的 request/response 对**（`add --kind finding --req/--resp` **写入口强制**，无报文直接拒绝；豁免走 `--waive-capture` 起草 + 人工 `waive --wid N --confirm` 确认；lint 兜底：漏洞无 req/resp 证据=error）。【判据】=基线 vs 复现的判定标准。test 事件 **value=动作、note=结论**
 - 物料归属三层：**项目级**（凭据表/报告/访问说明，`evidence --event-id 0`）｜**finding 级**（该漏洞自己的 req/resp 证据）｜**实体级**（资产实体层聚合观测）。归属判定=复测时必须用到；认证依赖禁止虚构
@@ -55,14 +55,14 @@ PentSuite/
 | 落资产 | `add --project P --kind domain\|port\|path\|param\|finding\|osint --value V --source "命令/URL" [--code][--tech][--service][--scope][--severity]` |
 | 重扫更新 | 同 kind+value 重复时 `add --update`：刷新观测字段并更新 last_seen（updated_at），状态与人审结论保留 |
 | 重建实体层 | `rebuild-assets --project P`（幂等；add/recon 资产类写入后自动触发，一般无需手跑） |
-| 登记测试 | `add --kind test --value "动作" --note "结论" --parent-ext <id>[,id2] --stage <阶段名> --source "命令" --auto --status confirmed --confidence high`（**--stage 必带**；value=动作、note=结论） |
-| 执行落库单通道 | `exec --project P --parent-ext N --cmd '<完整命令>' [--stage][--action][--note 结论][--timeout S]`——命令输出自动落盘 + test 事件自动入库 + 原始输出自动挂证据（etype=output/file），探测/测试类命令一律走此通道，防"测了没记" |
+| 登记测试 | `add --kind test --value "动作" --note "结论" --parent-ext <id>[,id2] --source "命令" --auto --status confirmed --confidence high`（value=动作、note=结论） |
+| 执行落库单通道 | `exec --project P --parent-ext N --cmd '<完整命令>' [--action][--note 结论][--timeout S]`——命令输出自动落盘 + test 事件自动入库 + 原始输出自动挂证据（etype=output/file），探测/测试类命令一律走此通道，防"测了没记" |
 | 结论同步 | `lifecycle --project P --id <finding> --code open\|reproduced\|not-reproduced\|fixed\|reopened [--note]`——复测结论机读化（test note 以机读词开头：复现/未复现/已修复/部分修复/仍存在/待复测） |
 | 登记漏洞 | `add --kind finding --req <请求原文\|-> --resp <响应原文\|-> ...`——**写入口强制：无 req/resp 直接拒绝**，自动挂 evidence（note=request/response）并在面板展示；报文确实已丢的加 `--waive-capture '原因'` 起草豁免（待人确认，确认前 lint 仍报 error） |
 | 证据 | `evidence --project P --event-id N --path F`（默认复制进套件；`--text` 直存文本；`--event-id 0`=项目级物料）；`evidence-move --id N --event-id M` 改挂归属 |
 | AI 推断 | `add ... --confidence high\|medium\|low`（推断类禁止 confirmed，一律 new 进待审） |
 | 查询 | `query --project P [--kind][--status]` |
-| SOP 提示 | `sop --project P`（查漏补缺提示清单：when 触发语义 + check 提示术语，AI 语义判断命中后对照自查；**提示层非门禁、非义务，不设豁免**，覆盖度由 AI 显式申报、人背书） |
+| SOP 提示 | `sop --project P`（扁平提示清单：when 触发语义 + check 提示术语 + 状态参考，AI 语义判断命中后对照自查；**提示层非门禁、非义务，不设豁免**，覆盖度由 AI 显式申报、人背书；无阶段概念） |
 | 豁免 | `waive --project P --id N --term T --reason R`（只作用于具体事件：报文豁免挂 finding、归因豁免挂 test；起草态不生效，人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
 | 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
@@ -72,7 +72,7 @@ PentSuite/
 
 ## 面板七视图（全交互联动）
 
-目标总览（卡片点击跳转筛选）｜SOP 提示（提示清单=when×check、状态卡过滤、lint 门禁）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+复制为 curl）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜报告（assets/pentest 模板+整库备份）
+目标总览（卡片点击跳转筛选）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+复制为 curl）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜报告·收尾（assets/pentest 模板+lint 门禁+整库备份）。SOP 提示已退役为 AI-only（CLI `sop`），面板不再展示
 
 AI 播报约定：**仅批次产生新待审项时**播报（链接+新增数+待审数+重点）；纯 --auto 批次不打扰。
 
@@ -105,7 +105,7 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 python pentdb/pentdb.py init --project demo
 python pentdb/pentdb.py panel --project demo      # 浏览器打开输出的 URL
 python pentdb/pentdb.py kb search --keyword 测试   # 未配凭据时返回友好提示
-cd pentdb && python -m unittest test_sop test_assets   # 25 用例回归
+cd pentdb && python -m unittest test_sop test_assets   # 24 用例回归
 ```
 
 - 数据存放：事实库 `pentdb/data/pentdb.db` 为本地文件，clone 后不存在、init 按需生成；凭据模板 `pentdb/kb/creds.json` 随仓库自带（空值），填入真实值后仅存本机、套件不会自动上传任何内容

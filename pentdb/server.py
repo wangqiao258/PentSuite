@@ -211,10 +211,6 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT * FROM raw_events WHERE project=? AND kind IN ('finding','osint') "
                     "ORDER BY id DESC", (p,)))
                 self._json({"findings": rows})
-            elif u.path == "/api/sop":
-                p = q.get("project", [""])[0]
-                import pentdb
-                self._json(pentdb.sop_report(c, p))
             elif u.path == "/api/suggestions":
                 p = q.get("project", [""])[0]
                 rows = rows_to_dicts(c.execute(
@@ -295,7 +291,6 @@ class Handler(BaseHTTPRequestHandler):
             action = (data.get("action") or "").strip()
             conclusion = (data.get("conclusion") or "").strip()
             source = (data.get("source") or "面板手工复测").strip()
-            stage = (data.get("stage") or "").strip()
             lifecycle = (data.get("lifecycle") or "").strip()
             if not fid or (not action and not lifecycle):
                 return self._json({"error": "finding_id 必填，action/lifecycle 至少一项"}, 400)
@@ -315,13 +310,6 @@ class Handler(BaseHTTPRequestHandler):
                 c0.close()
             if not action:
                 return self._json({"ok": True, "lifecycle": lifecycle, "id": None})
-            all_stages = pentdb.load_sop_cfg().get("stages", [])
-            if all_stages and stage not in all_stages:
-                stage = stage or (all_stages[0])
-                for cand in all_stages:
-                    if "利用" in cand or "验证" in cand:
-                        stage = cand
-                        break
             parents = ",".join([str(fid)] + [x.strip() for x in (row["parent_ext"] or "").split(",")
                                              if x.strip().isdigit()])
             ns = argparse.Namespace(
@@ -329,7 +317,7 @@ class Handler(BaseHTTPRequestHandler):
                 title="复测: " + action[:60], detail="", note=conclusion, source=source,
                 parent_ext=parents, merge_key="", status="confirmed", confidence="",
                 severity="", code="", tech="", service="", scope="in",
-                auto=True, update=False, origin="human", stage=stage)
+                auto=True, update=False, origin="human")
             try:
                 pentdb.cmd_add(ns)
             except SystemExit as e:
@@ -338,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 r2 = c2.execute("SELECT id FROM raw_events WHERE project=? AND kind='test' "
                                 "ORDER BY id DESC LIMIT 1", (row["project"],)).fetchone()
-                return self._json({"ok": True, "id": r2["id"] if r2 else None, "stage": stage})
+                return self._json({"ok": True, "id": r2["id"] if r2 else None})
             finally:
                 c2.close()
         if u.path == "/api/manual-add":
@@ -357,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
                 title="", detail="", note=data.get("note", ""), source=source,
                 parent_ext="", merge_key="", status="confirmed", confidence="",
                 severity=severity, code="", tech="", service="", scope=scope,
-                auto=False, update=bool(data.get("update")), origin="human", stage="")
+                auto=False, update=bool(data.get("update")), origin="human")
             try:
                 pentdb.cmd_add(ns)
             except SystemExit as e:

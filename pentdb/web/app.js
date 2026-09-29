@@ -15,53 +15,8 @@ async function boot(){
   $("#m-kind").onchange=()=>$("#m-sev").classList.toggle("hidden",$("#m-kind").value!=="finding");
   loadAll();
 }
-function loadAll(){loadOverview();loadSop();loadLint();loadFindings();loadAssets();loadTimeline();loadReview();loadReport()}
+function loadAll(){loadOverview();loadLint();loadFindings();loadAssets();loadTimeline();loadReview();loadReport()}
 
-const ST_TXT={done:"✓ 已测",registered:"◐ 已登记",missing:"○ 未测(提示)"};
-let sopFilter=null;
-async function loadSop(){
-  const d=await api("sop",{project:PROJECT});
-  const stages=Object.keys(d.stage.flags||{});
-  const cur=d.stage.index;
-  $("#sop-stage").innerHTML='<div class="stepper">'+stages.map((s,i)=>
-    `<span class="step ${i<cur?'done':(i===cur?'cur':'')}">${i<cur?'✓ ':''}${s}</span>`).join("")+
-    `<span class="muted" style="align-self:center;margin-left:8px">${d.stage.current}（${d.stage.index}/${d.stage.total}）</span></div>`;
-  const ST_COLOR={done:"var(--teal)",registered:"var(--amber)",missing:"var(--red)"};
-  const sc=(n,label,st)=>st
-    ?`<div class="card click ${sopFilter===st?"on":""}" data-st="${st}" title="点击只看该状态，再点取消">`+
-     `<b style="color:${ST_COLOR[st]||""}">${n}</b><span>${label}${sopFilter===st?" ●":""}</span></div>`
-    :`<div class="card"><b>${n}</b><span>${label}</span></div>`;
-  $("#sop-cards").innerHTML=
-    sc(d.total,"提示项","")+sc(d.done,"✓ 已测","done")+
-    sc(d.registered,"◐ 已登记","registered")+sc(d.missing,"○ 未测","missing");
-  // 阶段视图：计划（菜单）× 执行（test 流水）；状态过滤时只留含匹配项的阶段
-  const SV_TXT={done:"✓",registered:"◐",missing:"○"};
-  $("#stage-view").innerHTML=(d.stage_view||[]).filter(v=>
-    !sopFilter||v.menu.some(it=>it.state===sopFilter)).map(v=>{
-    const menuItems=sopFilter?v.menu.filter(it=>it.state===sopFilter):v.menu;
-    const menu=menuItems.map(it=>{
-      let h=`<span class="sopitem st-${it.state}" title="${ST_TXT[it.state]}${it.when?"："+it.when:""}（提示层，非门禁）">${SV_TXT[it.state]} ${esc(it.term)}`;
-      if(it.state==="missing"&&it.when)h+=` <span class="muted">${esc(it.when)}</span>`;
-      if(it.state==="done"&&it.ev)h+=` <span class="muted">${it.ev}</span>`;
-      return h+`</span>`;
-    }).join("")||"<span class='muted'>该阶段无提示项</span>";
-    const exe=v.executed.length?v.executed.map(t=>
-      `<div class="rec"><div class="hd"><b>#${t.id}</b> ${esc(t.value)} ${tag(t.status)} `+
-      `<span class="muted">${t.created_at}</span></div>`+
-      (t.note?`<div class="muted">${esc(t.note)}</div>`:"")+
-      `<div class="src">归因: ${t.parent_ext?esc(t.parent_ext):"—"} ｜ 来源: ${esc(t.source)}</div></div>`).join("")
-      :"<span class='muted'>暂无执行流水（AI 执行后 add --kind test --stage "+esc(v.stage)+" 落库即在此聚合）</span>";
-    const pend=(v.pending.length&&(!sopFilter||sopFilter==="registered"))?`<div class="muted" style="margin:2px 0">登记待执行：${v.pending.map(p=>esc(p.term)).join("、")}</div>`:"";
-    return `<div class="grp"><h4>${v.complete?"✓ ":""}${esc(v.stage)}（${v.done}/${v.total} 参考 · 流水 ${v.executed.length} 条）</h4>`+
-      `<div style="margin-bottom:4px">${menu}</div>${pend}`+
-      `<details ${v.executed.length?"open":""}><summary class="muted" style="cursor:pointer">执行流水（${v.executed.length}）</summary>${exe}</details></div>`;
-  }).join("")||(sopFilter?"<div class='muted'>当前状态过滤下无阶段菜单项</div>":"<div class='muted'>无阶段数据</div>");
-}
-$("#sop-cards").onclick=e=>{
-  const c=e.target.closest(".card[data-st]"); if(!c)return;
-  sopFilter=(sopFilter===c.dataset.st)?null:c.dataset.st;
-  loadSop();
-};
 async function loadLint(btn){
   const t0=new Date().toLocaleTimeString();
   if(btn){btn.disabled=true;btn.textContent="检查中…";}
@@ -255,7 +210,7 @@ function findingDetail(r){
     html+=`<div class="fd-tabs">${FD_TABS.map(([k,label])=>
       `<span class="fd-tab ${findTab===k?"on":""}" data-tab="${k}">${label}${k==="timeline"?`（${rel.length}）`:""}</span>`).join("")}</div>`;
     const timeline=rel.length?rel.map(t=>
-      `<div class="rec"><div class="hd"><b>${esc(t.value)}</b> ${tag(t.status)} ${t.stage?`<span class="tag t-kind">${esc(t.stage)}</span>`:""}`+
+      `<div class="rec"><div class="hd"><b>${esc(t.value)}</b> ${tag(t.status)}`+
       `<span style="flex:1"></span><span class="muted">${(t.created_at||"").slice(0,16)}</span></div>`+
       (t.note?`<div class="muted" style="margin-top:2px">结论: ${esc(t.note)}</div>`:"")+
       `<div class="src">归因: ${t.parent_ext?esc(t.parent_ext):"—"} ｜ 来源: ${esc(t.source)}</div></div>`).join("")
@@ -272,14 +227,13 @@ function findingDetail(r){
             LIFES.map(([k,label])=>`<option value="${k}" ${life===k?"selected":""}>${label}</option>`).join("")+
             `<option value="">不改生命周期</option></select>
           <input id="rt-source" value="面板手工复测" style="flex:1;min-width:120px">
-          <select id="rt-stage"></select>
           <button class="btn-ok" onclick="doRetest(${r.id})">登记复测</button>
         </div><div class="muted" id="rt-msg"></div></div>`;
   }else{
     html+=packet;
   }
   $("#finding-detail").innerHTML=html;
-  if(isFinding){loadEvidencePanel(r,rel);fillStageSelect();}
+  if(isFinding){loadEvidencePanel(r,rel);}
 }
 async function setLife(fid,code){
   if(!code)return;
@@ -287,16 +241,6 @@ async function setLife(fid,code){
     body:JSON.stringify({finding_id:fid,lifecycle:code})});
   if(!r.ok){alert("生命周期更新失败："+await r.text());return;}
   loadFindings();
-}
-let STAGES=[];
-async function fillStageSelect(){
-  const sel=$("#rt-stage"); if(!sel)return;
-  if(!STAGES.length){
-    try{const st=await api("stages",{project:PROJECT});STAGES=st.all||[];}catch(e){}
-  }
-  sel.innerHTML=STAGES.map(s=>{
-    const pick=s.includes("利用")||s.includes("验证");
-    return `<option ${pick?"selected":""}>${esc(s)}</option>`;}).join("")||"<option>利用验证</option>";
 }
 const evIsPkt=e=>e.etype==="request"||e.etype==="response"||(e.note&&(e.note.startsWith("request")||e.note.startsWith("response")));
 async function fillPkt(id,ev){
@@ -398,7 +342,7 @@ $("#finding-detail").addEventListener("click",async e=>{
 });
 async function doRetest(fid){
   const body={finding_id:fid,action:$("#rt-action").value.trim(),conclusion:$("#rt-note").value.trim(),
-    source:$("#rt-source").value.trim()||"面板手工复测",stage:$("#rt-stage").value,
+    source:$("#rt-source").value.trim()||"面板手工复测",
     lifecycle:$("#rt-life")?$("#rt-life").value:""};
   const msg=$("#rt-msg");
   if(!body.action){msg.style.color="var(--red)";msg.textContent="动作必填（只改生命周期用详情头部的快捷下拉）";return;}
@@ -407,7 +351,7 @@ async function doRetest(fid){
     const d=await r.json();
     if(!r.ok)throw new Error(d.error||r.status);
     msg.style.color="var(--teal)";
-    msg.textContent=`已登记复测 #${d.id}（stage=${d.stage}${body.lifecycle?" · 生命周期→"+body.lifecycle:""}）✓`;
+    msg.textContent=`已登记复测 #${d.id}${body.lifecycle?"（生命周期→"+body.lifecycle+"）":""} ✓`;
     findTab="timeline";
     loadAll();
   }catch(e2){
@@ -512,7 +456,7 @@ async function renderAssetDetail(){
   box.innerHTML=`<div class="muted" style="margin-bottom:6px">${esc(akey)} ｜ 首见 ${(all.first_seen||"").slice(0,10)} ｜ 末见 ${(all.last_seen||"").slice(0,10)}</div>`+
     (d.events||[]).map(r=>
       `<div class="rec"><div class="hd"><b>#${r.id}</b> ${kindTag(r.kind)} <b>${esc(r.value)}</b> ${tag(r.status)}`+
-      ` <span class="muted">${(r.created_at||"").slice(0,10)} · ${r.origin}${r.confidence?"/"+r.confidence:""}${r.stage?" · "+esc(r.stage):""}</span></div>`+
+      ` <span class="muted">${(r.created_at||"").slice(0,10)} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span></div>`+
       (r.note?`<div class="muted">${esc(r.note)}</div>`:"")+
       `<div class="src">来源: ${esc(r.source)}</div></div>`).join("")
     ||"<span class='muted'>无观测记录</span>";

@@ -3,10 +3,10 @@
 """PentDB 核心逻辑单测（stdlib unittest，零依赖）。运行：python -m unittest test_sop -v
 
 覆盖四块最易回归的纯逻辑：
-  1. 术语匹配 _term_in / _hints_menu（交替词、大小写、提示菜单构造）
+  1. 术语匹配 _term_in / _hints_menu（交替词、大小写、扁平提示清单构造）
   2. add 状态机守卫（AI 推断必 new、--auto 仅限事实类、重复拒绝、--update）
   3. lint_report（source 溯源 / test 归因 / scope / severity）
-  4. sop_report 提示清单视图（7 阶段菜单、test --stage 聚合、pending 术语反查回填）
+  4. sop_report 扁平提示对账（when 语义 × 术语状态参考，无阶段、纯只读）
 """
 import argparse
 import os
@@ -25,7 +25,7 @@ def ns(**kw):
     base = dict(project=PROJ, ext_id="", kind="note", value="v", title="", detail="",
                 note="", source="unittest", parent_ext="", merge_key="", status="new",
                 confidence="", severity="", code="", tech="", service="", scope="in",
-                auto=False, update=False, origin="agent", stage="",
+                auto=False, update=False, origin="agent",
                 req="", resp="", waive_capture="")
     base.update(kw)
     return argparse.Namespace(**base)
@@ -46,16 +46,16 @@ class TermMatch(unittest.TestCase):
     def test_case_insensitive(self):
         self.assertTrue(pentdb._term_in("nuclei", "Nuclei scan finished"))
 
-    def test_match_kind_and_contains(self):
+    def test_flat_menu(self):
         menu = pentdb._hints_menu(pentdb.load_sop_cfg())
-        # 漏洞探测阶段：术语去重保序（越权|IDOR 由两条 when 触发，只保留首次）
-        terms = [it["term"] for it in menu["漏洞探测"]]
-        self.assertEqual(terms.count("越权|IDOR"), 1)
-        self.assertEqual(terms[0], "认证与会话")
-        # 每个提示项都带 when 触发语义
-        self.assertTrue(all(it["when"] for it in menu["端口扫描"]))
-        # 菜单仍覆盖全部 7 阶段
-        self.assertEqual(len(menu), 7)
+        terms = [it["term"] for it in menu]
+        # 扁平结构：每项都带 when 触发语义，无阶段分组
+        self.assertTrue(all(it["when"] for it in menu))
+        # 同一术语在不同 when 下各自成项（不去重，保留触发语义）
+        self.assertEqual(terms.count("弱口令"), 2)
+        self.assertEqual(terms.count("越权|IDOR"), 2)
+        self.assertIn("服务识别", terms)
+        self.assertIn("归属确认", terms)
 
 
 class AddStateMachine(unittest.TestCase):
@@ -101,10 +101,6 @@ class AddStateMachine(unittest.TestCase):
         c.close()
         self.assertEqual(n, 1)
 
-    def test_stage_validated(self):
-        with self.assertRaises(SystemExit):
-            add(kind="test", value="t", parent_ext="0", status="confirmed", auto=True, stage="不存在")
-
 
 class Lint(unittest.TestCase):
     def test_rules(self):
@@ -128,51 +124,50 @@ class Lint(unittest.TestCase):
         self.assertTrue(any("bogus" in w for w in rep["warns"]))
 
 
-class SopStageView(unittest.TestCase):
+class SopHintsView(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         c = pentdb.connect()
         c.execute("INSERT OR IGNORE INTO projects(name, created_at) VALUES(?,?)", (PROJ, pentdb.now()))
         c.commit(); c.close()
-        # 端口扫描阶段的测试事实：parent_ext=0（项目级归因）
+        # 服务识别类测试事实：parent_ext=0（项目级归因）
         add(kind="test", value="服务识别 nmap -sV 1.2.3.4", parent_ext="0",
-            note="nmap 服务识别结果", status="confirmed", auto=True, confidence="high",
-            stage="端口扫描")
-        # 待审 pending（术语反查回填 stage）
+            note="nmap 服务识别结果", status="confirmed", auto=True, confidence="high")
+        # 旧 pending 登记（legacy：registered 状态参考仍能命中）
         c = pentdb.connect()
-        c.execute("INSERT INTO pending_tests(project,event_id,term,created_at,stage) VALUES(?,?,?,?,?)",
-                  (PROJ, 0, "认证与会话", pentdb.now(), ""))
+        c.execute("INSERT INTO pending_tests(project,event_id,term,created_at) VALUES(?,?,?,?)",
+                  (PROJ, 0, "认证与会话", pentdb.now()))
         c.commit(); c.close()
 
-    def test_seven_stages_menu(self):
+    def _rep(self):
         c = pentdb.connect()
         rep = pentdb.sop_report(c, PROJ)
         c.close()
-        self.assertEqual(len(rep["stage_view"]), 7)
-        by = {v["stage"]: v for v in rep["stage_view"]}
-        self.assertEqual(by["端口扫描"]["menu"][0]["term"], "服务识别")
+        return rep
 
-    def test_test_event_aggregates_to_stage(self):
-        c = pentdb.connect()
-        rep = pentdb.sop_report(c, PROJ)
-        c.close()
-        port = {v["stage"]: v for v in rep["stage_view"]}["端口扫描"]
-        self.assertTrue(any(t["value"].startswith("服务识别") for t in port["executed"]))
+    def test_flat_report_no_stage(self):
+        rep = self._rep()
+        self.assertEqual(set(rep), {"hints", "total", "done", "registered", "missing"})
+        self.assertEqual(rep["total"], len(rep["hints"]))
+        self.assertEqual(rep["done"] + rep["registered"] + rep["missing"], rep["total"])
 
     def test_menu_state_done_via_text_match(self):
-        c = pentdb.connect()
-        rep = pentdb.sop_report(c, PROJ)
-        c.close()
-        port = {v["stage"]: v for v in rep["stage_view"]}["端口扫描"]
-        self.assertIn(("服务识别", "done"), [(i["term"], i["state"]) for i in port["menu"]])
+        rep = self._rep()
+        pairs = [(i["term"], i["state"]) for i in rep["hints"]]
+        self.assertIn(("服务识别", "done"), pairs)
+        done = [i for i in rep["hints"] if i["state"] == "done"]
+        self.assertTrue(all(i["ev"].startswith("#") for i in done))
 
-    def test_pending_stage_backfill(self):
-        c = pentdb.connect()
-        pentdb.sop_report(c, PROJ)  # 触发幂等回填
-        row = c.execute("SELECT stage FROM pending_tests WHERE term='认证与会话' AND project=?",
-                        (PROJ,)).fetchone()
-        c.close()
-        self.assertEqual(row["stage"], "漏洞探测")
+    def test_pending_registered(self):
+        rep = self._rep()
+        pairs = [(i["term"], i["state"]) for i in rep["hints"]]
+        self.assertIn(("认证与会话", "registered"), pairs)
+
+    def test_missing_default(self):
+        rep = self._rep()
+        pairs = [(i["term"], i["state"]) for i in rep["hints"]]
+        self.assertIn(("目录爆破", "missing"), pairs)
+        self.assertTrue(all(i["ev"] is None for i in rep["hints"] if i["state"] == "missing"))
 
 
 if __name__ == "__main__":

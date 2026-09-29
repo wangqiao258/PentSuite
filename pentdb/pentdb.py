@@ -300,8 +300,6 @@ def cmd_add(a):
         sys.exit(f"[x] severity 必须是 {'/'.join(VALID_SEVERITY)} 或留空")
     if a.scope not in VALID_SCOPE:
         sys.exit(f"[x] scope 必须是 {'/'.join(VALID_SCOPE)}")
-    if (a.stage or "") and a.stage not in load_sop_cfg().get("stages", []):
-        sys.exit(f"[x] stage 必须是 SOP 定义的阶段之一: {'/'.join(load_sop_cfg().get('stages', []))}")
     # test 是过程记录不是空壳：必须带 title/detail/note 至少一项，否则待审页全是空白噪音
     if a.kind == "test" and not ((a.title or "").strip() or (a.detail or "").strip() or (a.note or "").strip()):
         sys.exit("[x] test 事件必须带 --title 或 --detail 或 --note（过程描述），"
@@ -361,12 +359,12 @@ def cmd_add(a):
     ts = now()
     cur = c.execute(
         "INSERT INTO raw_events(project,ext_id,kind,value,title,detail,note,parent_ext,"
-        "merge_key,status,confidence,severity,code,tech,service,scope,verified_at,source,origin,stage,created_at,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "merge_key,status,confidence,severity,code,tech,service,scope,verified_at,source,origin,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (a.project, a.ext_id, a.kind, a.value, a.title or "", a.detail or "",
          a.note or "", a.parent_ext or "", merge_key, status, a.confidence or "",
          a.severity or "", str(a.code or ""), a.tech or "", a.service or "",
-         a.scope, verified, a.source, a.origin, a.stage or "", ts, ts))
+         a.scope, verified, a.source, a.origin, ts, ts))
     log_change(c, a.project, "add", f"#{cur.lastrowid} {a.kind}:{a.value[:60]}")
     c.commit()
     if a.kind == "finding" and (req_val or resp_val):
@@ -1068,136 +1066,55 @@ def _term_in(term, text):
 
 
 def _hints_menu(cfg):
-    """stage_hints -> 每阶段提示菜单（术语去重保序）。返回 {stage: [{"term","when"}]}"""
-    menu = {}
-    for stage, hints in cfg.get("stage_hints", {}).items():
-        items, seen = [], set()
-        for h in hints:
-            for term in h.get("check", []):
-                if term not in seen:
-                    seen.add(term)
-                    items.append({"term": term, "when": h.get("when", "")})
-        menu[stage] = items
-    return menu
+    """hints -> 扁平提示清单 [{term,when}]。同一术语在不同 when 下各自成项（不去重，保留触发语义）"""
+    items = []
+    for h in cfg.get("hints", []):
+        for term in h.get("check", []):
+            items.append({"term": term, "when": h.get("when", "")})
+    return items
 
 
 def sop_report(c, project):
-    cfg = load_sop_cfg()
-    stages_all = cfg.get("stages", [])
-    stages = list(stages_all)
-    menu_map = _hints_menu(cfg)
+    """扁平 SOP 提示对账：when 语义 × check 术语 × 状态参考（AI 自查用；提示层非门禁）。
 
+    状态 = 术语与本项目 test 事件/pending 登记 的关键词命中，仅供 AI 参考；
+    真实覆盖度由 AI 显式申报、人背书，不做机器判定，也不写库（纯只读）。"""
+    menu = _hints_menu(load_sop_cfg())
     tests = [dict(r) for r in c.execute(
         "SELECT * FROM raw_events WHERE project=? AND kind='test'", (project,))]
     test_texts = {t["id"]: (t["value"] or "") + " " + (t["note"] or "") + " " + (t["source"] or "")
                   for t in tests}
-    pend_rows = [dict(p) for p in c.execute("SELECT * FROM pending_tests WHERE project=?", (project,))]
-    pend_terms = [p["term"] for p in pend_rows]
+    pend_terms = [p["term"] for p in c.execute(
+        "SELECT term FROM pending_tests WHERE project=?", (project,))]
 
-    # 术语 -> 阶段映射（供旧数据 stage 回填）
-    term_stage = {}
-    for stage, items in menu_map.items():
-        for it in items:
-            term_stage.setdefault(it["term"], stage)
+    hints = []
+    for it in menu:
+        term = it["term"]
+        hit = next((t for t in tests if _term_in(term, test_texts[t["id"]])), None)
+        if hit:
+            st, ev = "done", "#" + str(hit["id"])
+        elif any(_term_in(term, p) for p in pend_terms):
+            st, ev = "registered", "pending"
+        else:
+            st, ev = "missing", None
+        hints.append({"term": term, "when": it["when"], "state": st, "ev": ev})
 
-    def _stage_for_term(term):
-        if term in term_stage:
-            return term_stage[term]
-        for mt, s2 in term_stage.items():
-            if _term_in(mt, term) or _term_in(term, mt):
-                return s2
-        return ""
-
-    # 幂等回填：旧数据（pending_tests / test 事件）缺 stage 的按术语反查补上
-    dirty = 0
-    for p in pend_rows:
-        if not (p["stage"] or "").strip():
-            st = _stage_for_term(p["term"])
-            if st:
-                c.execute("UPDATE pending_tests SET stage=? WHERE id=?", (st, p["id"]))
-                dirty += 1
-    for t in tests:
-        if not (t["stage"] or "").strip():
-            st = _stage_for_term(test_texts[t["id"]])
-            if st:
-                c.execute("UPDATE raw_events SET stage=? WHERE id=?", (st, t["id"]))
-                t["stage"] = st
-                dirty += 1
-    if dirty:
-        log_change(c, project, "stage-backfill", f"术语反查回填 stage {dirty} 条")
-        c.commit()
-
-    # 阶段视图：提示菜单（when 触发语义 + check 术语）× 执行（该阶段 test 流水）
-    # 状态匹配仅作参考展示（供 AI 自查），不构成门禁——覆盖度由 AI 显式申报、人背书
-    stage_view = []
-    total = done = registered = missing = 0
-    for s in stages:
-        items, executed_ids = [], set()
-        for it in menu_map.get(s, []):
-            term = it["term"]
-            hit_test = next((t for t in tests if _term_in(term, test_texts[t["id"]])), None)
-            if hit_test:
-                items.append({"term": term, "when": it["when"], "state": "done", "ev": "#" + str(hit_test["id"])})
-                executed_ids.add(hit_test["id"])
-            elif any(_term_in(term, p) for p in pend_terms):
-                items.append({"term": term, "when": it["when"], "state": "registered", "ev": "pending"})
-            else:
-                items.append({"term": term, "when": it["when"], "state": "missing", "ev": None})
-            st = items[-1]["state"]
-            total += 1
-            if st == "done":
-                done += 1
-            elif st == "registered":
-                registered += 1
-            else:
-                missing += 1
-        executed = [t for t in tests if (t["stage"] or "") == s]
-        executed += [t for t in tests if not (t["stage"] or "").strip()
-                     and t["id"] in executed_ids and t not in executed]
-        sdone = sum(1 for i in items if i["state"] == "done")
-        sreg = sum(1 for i in items if i["state"] == "registered")
-        stage_view.append({
-            "stage": s, "menu": items, "done": sdone,
-            "total": len(items),
-            "complete": bool(items) and sdone == len(items),
-            "executed": [{"id": t["id"], "value": t["value"], "note": t["note"], "status": t["status"],
-                          "parent_ext": t["parent_ext"], "source": t["source"],
-                          "created_at": t["created_at"]} for t in executed],
-            "pending": [{"term": p["term"], "at": p["created_at"]}
-                        for p in pend_rows if (p["stage"] or "") == s],
-        })
-
-    # 当前阶段判定：菜单全部已测视为走完（仅展示参考，不拦截任何动作）
-    flags = [v["complete"] for v in stage_view if v["menu"]]
-    cur = len(stages)
-    for i, ok in enumerate(flags):
-        if not ok:
-            cur = i
-            break
-    stage = {"current": stages[cur] if cur < len(stages) else "(全部完成)",
-             "index": cur, "total": len(stages), "flags": dict(zip(stages, flags))}
-    return {"stage": stage, "stages_all": stages_all,
-            "stage_view": stage_view, "total": total, "done": done,
-            "registered": registered, "missing": missing}
+    cnt = lambda s: sum(1 for h in hints if h["state"] == s)
+    return {"hints": hints, "total": len(hints),
+            "done": cnt("done"), "registered": cnt("registered"), "missing": cnt("missing")}
 
 def cmd_sop(a):
     c = connect()
     require_project(c, a.project)
     rep = sop_report(c, a.project)
     print("== SOP hints: %s ==" % a.project)
-    print("当前阶段: %s (%d/%d)" % (rep["stage"]["current"], rep["stage"]["index"], rep["stage"]["total"]))
-    cov = rep["done"] * 100 // rep["total"] if rep["total"] else 100
-    print("参考覆盖: 提示项 %d | 已测 %d | 已登记 %d | 未测 %d | 参考完成率 %d%%"
-          % (rep["total"], rep["done"], rep["registered"], rep["missing"], cov))
-    print("-- 按语义判断 when 是否命中当前目标面，命中才对照 check 查漏；未命中/不适用可跳过（提示层，非门禁）--")
-    for v in rep["stage_view"]:
-        mark = "✓" if v["complete"] else " "
-        print("%s %-6s 参考 %d/%d  执行流水 %d 条" % (mark, v["stage"], v["done"],
-                                                    v["total"], len(v["executed"])))
-        for it in v["menu"]:
-            ctx = "（%s）" % it["when"] if it["state"] == "missing" and it["when"] else ""
-            tail = "" if it["state"] == "done" else "  ← 命中则补测，未命中/不适用跳过并在收尾申报"
-            print("      %-12s %-14s %s%s" % (STATE_ICON[it["state"]], it["term"], ctx, tail))
+    print("提示项 %d | 已测 %d | 已登记 %d | 未测 %d（状态为关键词命中参考；真实覆盖由 AI 申报、人背书）"
+          % (rep["total"], rep["done"], rep["registered"], rep["missing"]))
+    print("-- 按语义判断 when 是否命中当前目标面，命中才对照 check 查漏；未命中/不适用跳过并在收尾申报（提示层，非门禁）--")
+    for it in rep["hints"]:
+        ctx = "（%s）" % it["when"] if it["when"] else ""
+        tail = "" if it["state"] == "done" else "  ← 命中则补测，未命中/不适用跳过并在收尾申报"
+        print("  %-12s %-14s %s%s" % (STATE_ICON[it["state"]], it["term"], ctx, tail))
 
 
 def cmd_waive(a):
@@ -1386,7 +1303,7 @@ def cmd_exec(a):
         detail=detail, note=note, source=cmd_str,
         parent_ext=a.parent_ext, merge_key="", status="confirmed",
         confidence=a.confidence, severity=a.severity, code="", tech="", service="",
-        scope="in", auto=True, update=False, origin="agent", stage=a.stage or "")
+        scope="in", auto=True, update=False, origin="agent")
     try:
         cmd_add(ns)
     except SystemExit as e:
@@ -1500,7 +1417,6 @@ def main():
     sp.add_argument("--tech", default="", help="指纹/技术栈（cloudflare/tomcat/istio…）")
     sp.add_argument("--service", default="", help="端口服务（mysql/http/ssh…）")
     sp.add_argument("--scope", default="unknown", help="范围标记 in/out/unknown")
-    sp.add_argument("--stage", default="", help="所属 SOP 阶段（test 事件建议必带，面板按阶段聚合）")
     sp.add_argument("--auto", action="store_true", help="机器可验证事实，允许自动 confirmed")
     sp.add_argument("--update", action="store_true",
                     help="重扫更新：同 kind+value 已存在时刷新观测字段（note/code/tech/service/来源/验证时间），状态与人审结论保留")
@@ -1513,7 +1429,6 @@ def main():
                     help="被测对象 record id（多对象逗号分隔）")
     sp.add_argument("--cmd", required=True,
                     help="完整命令串，原样执行（如 --cmd 'curl -is \"http://x\"'；外层单引号保内层双引号）")
-    sp.add_argument("--stage", default="", help="所属 SOP 阶段（建议必带）")
     sp.add_argument("--action", default="", help="动作标签（进 value；缺省用命令本身）")
     sp.add_argument("--title", default="")
     sp.add_argument("--note", default="", help="结论（AI 判定写这里，复测时间轴展示）")
