@@ -256,6 +256,12 @@ class Handler(BaseHTTPRequestHandler):
                 p = q.get("project", [""])[0]
                 template = q.get("template", ["assets"])[0]
                 import pentdb
+                rep = pentdb.lint_report(c, p)
+                if rep["errors"] and q.get("force", ["0"])[0] != "1":
+                    self._json({"error": f"lint 有 {len(rep['errors'])} error，拒绝出报告——"
+                                         "先修复或经人工确认豁免（带错出报告需人工加 force=1）",
+                                "lint": rep}, 409)
+                    return
                 if template == "pentest":
                     self._json({"report": pentdb._pentest_report(c, p)})
                 else:

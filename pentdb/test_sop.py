@@ -25,12 +25,15 @@ def ns(**kw):
     base = dict(project=PROJ, ext_id="", kind="note", value="v", title="", detail="",
                 note="", source="unittest", parent_ext="", merge_key="", status="new",
                 confidence="", severity="", code="", tech="", service="", scope="in",
-                auto=False, update=False, origin="agent", stage="")
+                auto=False, update=False, origin="agent", stage="",
+                req="", resp="", waive_capture="")
     base.update(kw)
     return argparse.Namespace(**base)
 
 
 def add(**kw):
+    if kw.get("kind") == "finding" and not kw.get("req"):
+        kw.setdefault("waive_capture", "unittest 无报文建档")  # 状态机用例不关心报文，走豁免起草通道
     pentdb.cmd_add(ns(**kw))
 
 

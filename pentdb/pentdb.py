@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS waives (
   event_id   INTEGER NOT NULL,
   term       TEXT NOT NULL,
   reason     TEXT NOT NULL,
-  at         TEXT NOT NULL
+  at         TEXT NOT NULL,
+  confirmed  INTEGER DEFAULT 0                     -- 0=起草（AI 可起草不得自批）1=人工确认生效
 );
 CREATE TABLE IF NOT EXISTS reviews (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +178,13 @@ def connect():
         c.execute("UPDATE evidence SET etype='request' WHERE note LIKE 'request%'")
         c.execute("UPDATE evidence SET etype='response' WHERE note LIKE 'response%'")
         c.execute("UPDATE evidence SET etype='file' WHERE etype IS NULL OR etype=''")
+        c.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE waives ADD COLUMN confirmed INTEGER DEFAULT 0")
+        # 仅首次加列时回填存量=已确认（祖传豁免不追溯，存量复核另行走 waive --wid N --confirm），随即 commit 释放写锁
+        c.execute("UPDATE waives SET confirmed=1")
         c.commit()
     except sqlite3.OperationalError:
         pass
@@ -342,6 +350,12 @@ def cmd_add(a):
                 c.commit()
             print(f"[ok] 重扫更新 #{dup['id']} ({a.kind}: {a.value[:50]}) ｜ {summary}")
             return
+    # 写入口硬门禁：判定漏洞必须带真实报文（此前只在 lint 事后报 error，AI 不跑 lint 即绕过——收口到写入即拒绝）
+    if a.kind == "finding" and (not req_val or not resp_val):
+        if not (getattr(a, "waive_capture", "") or "").strip():
+            sys.exit("[x] 判定漏洞必须带真实报文：--req <文件|-> --resp <文件|->（写入口强制）；"
+                     "初测报文确实已丢的，加 --waive-capture '原因' 起草豁免——"
+                     "豁免待人工确认生效，确认前 lint 仍报 error，AI 不得代批")
     merge_key = a.merge_key or (a.value if a.kind == "domain" else "")
     verified = now() if status == "confirmed" else ""
     ts = now()
@@ -367,6 +381,15 @@ def cmd_add(a):
                                           text=resp_text, note="response"))
         c.commit()
         print(f"[ok] 请求/响应证据已挂 #{cur.lastrowid}（evidence {'/'.join(map(str, ev_ids))}）")
+    if a.kind == "finding" and (getattr(a, "waive_capture", "") or "").strip():
+        reason = a.waive_capture.strip()
+        wcur = c.execute("INSERT INTO waives(project,event_id,term,reason,at,confirmed) VALUES(?,?,?,?,?,0)",
+                         (a.project, cur.lastrowid, "无抓包待补", reason, now()))
+        log_change(c, a.project, "waive",
+                   f"wid={wcur.lastrowid} #{cur.lastrowid} 无抓包待补（起草，待人工确认）: {reason}")
+        c.commit()
+        print(f"[!] 无报文建档：豁免 wid={wcur.lastrowid} 已起草——待人工确认后生效："
+              f"waive --project {a.project} --wid {wcur.lastrowid} --confirm（确认前 lint 仍报 error）")
     if a.kind in ASSET_KINDS:
         rebuild_assets(c, a.project)
         c.commit()
@@ -622,12 +645,14 @@ def lint_report(c, project):
     errors, warns = [], []
     # test 事件缺 parent_ext 无补录通道（test 是事件流，--update 不适用），
     # 允许用 waive(event_id=该事件, term 含 parent_ext) 留痕豁免；豁免清单收尾提交用户裁决。
-    waived_pe = {w["event_id"] for w in c.execute(
-        "SELECT event_id,term FROM waives WHERE project=?", (project,))
-        if "parent_ext" in (w["term"] or "")}
-    waived_capture = {w["event_id"] for w in c.execute(
-        "SELECT event_id,term FROM waives WHERE project=?", (project,))
-        if "抓包" in (w["term"] or "")}
+    wrows = c.execute("SELECT id,event_id,term,confirmed FROM waives WHERE project=?",
+                      (project,)).fetchall()
+    # 豁免只有"已确认"（confirmed=1）才生效——AI 可起草豁免但不得自批（对齐 kb approve 的人审门）
+    waived_pe = {w["event_id"] for w in wrows
+                 if "parent_ext" in (w["term"] or "") and w["confirmed"]}
+    waived_capture = {w["event_id"] for w in wrows
+                      if "抓包" in (w["term"] or "") and w["confirmed"]}
+    draft_waives = [w for w in wrows if not w["confirmed"]]
     ev_req = {r[0] for r in c.execute(
         "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'request%'", (project,))}
     ev_resp = {r[0] for r in c.execute(
@@ -677,11 +702,15 @@ def lint_report(c, project):
                          f"注意【请求】是用例不是事实，事实报文=evidence 的 request/response 对）")
         if r["kind"] == "finding" and rid not in waived_capture \
                 and (rid not in ev_req or rid not in ev_resp):
-            errors.append(f"#{rid} 漏洞缺请求/响应证据（判定漏洞时必须把真实 req/resp 落库："
-                          f"add --kind finding --req <文件|-> --resp <文件|->；"
-                          f"初测报文已丢的可 waive --term 无抓包待补 留痕豁免）")
+            errors.append(f"#{rid} 漏洞缺请求/响应证据（写入口已强制：add --kind finding "
+                          f"--req <文件|-> --resp <文件|->；初测报文已丢的走 --waive-capture 起草豁免，"
+                          f"人工 waive --wid N --confirm 确认后生效）")
         if r["kind"] == "finding" and not (r["parent_ext"] or "").strip():
             warns.append(f"#{rid} finding 缺 parent_ext（应归因到被测资产 record id，目标上下文断裂）")
+    if draft_waives:
+        warns.append("待人工确认的豁免 " + "、".join(
+            f"wid={w['id']}(#{w['event_id']} {w['term']})" for w in draft_waives)
+            + " ——起草态不生效，人工确认：waive --wid N --confirm")
     return {"errors": errors, "warns": warns}
 
 
@@ -811,9 +840,16 @@ def _pentest_report(c, project):
 
 
 def cmd_report(a):
+    c = connect()
+    require_project(c, a.project)
+    # 报告出口门禁：lint 有 error 拒绝出报告（防"收尾忘了跑 lint"绕过；--force 仅限人工解除）
+    rep = lint_report(c, a.project)
+    if rep["errors"] and not getattr(a, "force", False):
+        for e in rep["errors"]:
+            print(f"ERROR {e}")
+        sys.exit(f"[x] 报告出口门禁：lint {len(rep['errors'])} error——先修复或经人工确认豁免；"
+                 f"确需带错出报告用 --force（人的决定，AI 不得使用）")
     if getattr(a, "template", "") == "pentest":
-        c = connect()
-        require_project(c, a.project)
         text = _pentest_report(c, a.project)
         if a.out:
             parent = os.path.dirname(os.path.abspath(a.out))
@@ -826,8 +862,6 @@ def cmd_report(a):
                 sys.stdout.reconfigure(encoding="utf-8")
             print(text)
         return
-    c = connect()
-    require_project(c, a.project)
     rows = c.execute("SELECT * FROM raw_events WHERE project=? ORDER BY kind, id",
                      (a.project,)).fetchall()
     domains = [r for r in rows if r["kind"] == "domain"]
@@ -1281,19 +1315,44 @@ def cmd_sop(a):
 
 
 def cmd_waive(a):
-    if not a.reason:
-        sys.exit("[x] 豁免必须写明 --reason（收尾时豁免清单提交用户裁决）")
     c = connect()
     require_project(c, a.project)
+    confirm = getattr(a, "confirm", False)
+    wid = getattr(a, "wid", 0) or 0
+    if confirm:
+        # 确认生效是人的决定（对齐 kb approve --confirm 模式），AI 只能起草
+        if not wid:
+            sys.exit("[x] 确认豁免必须指定 --wid <豁免记录id>（waive 起草时输出）——豁免生效是人的决定，AI 只能起草")
+        row = c.execute("SELECT * FROM waives WHERE id=? AND project=?", (wid, a.project)).fetchone()
+        if not row:
+            sys.exit(f"[x] 豁免记录不存在: wid={wid}")
+        if row["confirmed"]:
+            print(f"[ok] wid={wid} 已是确认态，无需重复确认")
+            return
+        c.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
+        log_change(c, a.project, "waive-confirm",
+                   f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}")
+        c.commit()
+        print(f"[ok] wid={wid} 豁免已确认生效（#{row['event_id']} {row['term']}）")
+        return
+    if not a.reason:
+        sys.exit("[x] 豁免必须写明 --reason；豁免为起草态，需人工 waive --wid N --confirm 确认后才生效")
+    if not (a.term or "").strip():
+        sys.exit("[x] 起草豁免必须写明 --term（豁免条目，如 无抓包待补 / test事件缺parent_ext）")
+    if a.id is None:
+        sys.exit("[x] 起草豁免必须指定 --id <事件id>（id=0 表示项目级/阶段必测豁免）；"
+                 "确认已有豁免用 --wid N --confirm")
     if a.id != 0:
         row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?", (a.id, a.project)).fetchone()
         if not row:
             sys.exit(f"[x] 记录不存在: #{a.id}（id=0 表示项目级/阶段必测豁免）")
-    c.execute("INSERT INTO waives(project,event_id,term,reason,at) VALUES(?,?,?,?,?)",
-              (a.project, a.id, a.term, a.reason, now()))
-    log_change(c, a.project, "waive", f"#{a.id} {a.term}: {a.reason}")
+    wcur = c.execute("INSERT INTO waives(project,event_id,term,reason,at,confirmed) VALUES(?,?,?,?,?,0)",
+                     (a.project, a.id, a.term, a.reason, now()))
+    log_change(c, a.project, "waive",
+               f"wid={wcur.lastrowid} #{a.id} {a.term}: {a.reason}（起草，待人工确认）")
     c.commit()
-    print(f"[ok] #{a.id} 豁免 {a.term} ← {a.reason}")
+    print(f"[ok] wid={wcur.lastrowid} 豁免已起草（#{a.id} {a.term}）——待人工确认后生效："
+          f"waive --project {a.project} --wid {wcur.lastrowid} --confirm")
 
 
 def attach_evidence(c, project, event_id, path="", text=None, note="", keep_in_place=False):
@@ -1563,6 +1622,8 @@ def main():
                     help="finding 专用：真实请求原文（文件路径或 - 接 stdin），自动挂 evidence note=request")
     sp.add_argument("--resp", default="",
                     help="finding 专用：真实响应原文（文件路径或 - 接 stdin），自动挂 evidence note=response")
+    sp.add_argument("--waive-capture", dest="waive_capture", default="",
+                    help="finding 专用：初测报文已丢时的豁免原因（无报文建档，豁免起草待人确认生效）")
     sp.add_argument("--source", required=True)
     sp.add_argument("--ext-id", dest="ext_id", default="")
     sp.add_argument("--parent-ext", dest="parent_ext", default="")
@@ -1627,6 +1688,8 @@ def main():
     sp = sub.add_parser("report")
     sp.add_argument("--project", required=True)
     sp.add_argument("--out", default="")
+    sp.add_argument("--force", action="store_true",
+                    help="带 lint error 强制出报告（人的决定，AI 不得使用；缺省 error 即拒绝）")
     sp.add_argument("--template", default="assets", choices=("assets", "pentest"),
                     help="assets=资产清单（默认）；pentest=渗透测试报告（描述/原因/手工验证/修复）")
     sp.set_defaults(fn=cmd_report)
@@ -1639,11 +1702,14 @@ def main():
     sp.add_argument("--apply", action="store_true", help="未登记项自动转 pending_tests")
     sp.set_defaults(fn=cmd_sop)
 
-    sp = sub.add_parser("waive")
+    sp = sub.add_parser("waive", help="豁免：AI 起草（confirmed=0，不生效），人工 --wid N --confirm 确认后生效")
     sp.add_argument("--project", required=True)
-    sp.add_argument("--id", type=int, required=True)
-    sp.add_argument("--term", required=True)
-    sp.add_argument("--reason", required=True)
+    sp.add_argument("--id", type=int, default=None,
+                    help="起草豁免：目标事件 id（id=0 项目级/阶段必测豁免）")
+    sp.add_argument("--wid", type=int, default=0, help="确认豁免：waive 起草时输出的豁免记录 id")
+    sp.add_argument("--confirm", action="store_true", help="人工确认豁免生效（人的决定，配合 --wid）")
+    sp.add_argument("--term", default="")
+    sp.add_argument("--reason", default="")
     sp.set_defaults(fn=cmd_waive)
 
     sp = sub.add_parser("drop")
