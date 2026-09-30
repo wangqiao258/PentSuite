@@ -130,6 +130,14 @@ def cmd_add(a):
          a.scope, verified, a.source, a.origin, ts, ts))
     log_change(c, a.project, "add", f"#{cur.lastrowid} {a.kind}:{a.value[:60]}")
     c.commit()
+    if a.kind == "test":
+        # test 结论 → finding 生命周期自动联动（add 与 exec 两通道都经本写入口，天然全覆盖）。
+        # 幂等克制：note 非机读词开头（散文）/「待复测」/目标已同值 均不触发、不报错；
+        # 留痕复用 set_lifecycle，tag=（test#N 自动）与手动 CLI 的（CLI）可区分。
+        from pdb_findings import sync_lifecycle_from_test  # 函数级延迟导入：pdb_findings 顶层依赖本模块，避免环
+        linked = sync_lifecycle_from_test(c, a.project, cur.lastrowid, a.note, a.parent_ext)
+        if linked:
+            c.commit()
     if a.kind == "finding" and (req_val or resp_val):
         ev_ids = []
         if req_val:
@@ -231,6 +239,17 @@ def rebuild_assets(c, project):
         if r["kind"] == "path" and r["value"] not in path_host:
             path_host[r["value"]] = r["id"]
 
+    # endpoint 归属拍板（2026-10）：一律归 host（parent_atype=host、parent_akey=host akey），
+    # 接受副作用（akey 无 scheme/端口；同 host 的 http/https 同路径归并为一行）。
+    # host 观测可能先于/后于 path 出现，服务键需预先收集：parent_ext 若直指 service
+    # （'host:port'），上溯剥离端口归挂其 host；host 实体不存在时保持解析值兜底（面板合成挂靠，不引入新状态）。
+    svc_keys = set()
+    for r in rows:
+        if r["kind"] == "port":
+            h, p = _split_hostport(r["value"])
+            if h and p:
+                svc_keys.add(f"{h}:{p}")
+
     ent = {}
 
     def put(atype, akey, display, patype, pkey, ev):
@@ -280,12 +299,16 @@ def rebuild_assets(c, project):
                 mul(he, "techs", r["tech"]); mul(he, "codes", r["code"])
         elif r["kind"] == "path":
             host = _resolve_host(r["parent_ext"], by_id, path_host)
+            if host in svc_keys:  # parent_ext 指向 service：上溯一层归其 host
+                host = host.rsplit(":", 1)[0]
             p = val if val.startswith("/") else "/" + val
             akey = (host + p) if host else ("?" + p)
             e = put("endpoint", akey, akey, "host", host, r)
             mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
         elif r["kind"] == "param":
             host = _resolve_host(r["parent_ext"], by_id, path_host)
+            if host in svc_keys:  # 同 path：service 引用上溯归 host
+                host = host.rsplit(":", 1)[0]
             # param 归属于它所属的 endpoint：从 parent_ext 提取全部路径段，逐一并入
             paths = re.findall(r"/[^\s,]*", r["parent_ext"] or "")
             paths = [p for p in paths if len(p) > 1] or [""]
@@ -294,11 +317,12 @@ def rebuild_assets(c, project):
                 e = put("endpoint", akey, akey, "host", host, r)
                 mul(e, "params", val); mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
 
-    # parent_atype 语义修正：parent 解析值若实为库内域名（且无同名 host 实体），记真实类型 domain
+    # parent_atype 语义修正（仅 service）：parent 解析值若实为库内域名（且无同名 host 实体），记真实类型 domain。
+    # endpoint 不参与本修正（拍板：endpoint 一律归 host，即使父值同时是域名/库内无 host 实体，保持 parent_atype=host）
     dom_keys = {k for (at, k) in ent if at == "domain"}
     host_keys = {k for (at, k) in ent if at == "host"}
     for (at, k), e in ent.items():
-        if at in ("endpoint", "service") and e["parent_akey"] in dom_keys and e["parent_akey"] not in host_keys:
+        if at == "service" and e["parent_akey"] in dom_keys and e["parent_akey"] not in host_keys:
             e["parent_atype"] = "domain"
 
     c.execute("DELETE FROM assets WHERE project=?", (project,))

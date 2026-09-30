@@ -66,7 +66,7 @@ PentSuite/
 | 重建实体层 | `rebuild-assets --project P`（幂等；add/recon 资产类写入后自动触发，一般无需手跑） |
 | 登记测试 | `add --kind test --value "动作" --note "结论" --parent-ext <id>[,id2] --source "命令" --auto --status confirmed --confidence high`（value=动作、note=结论） |
 | 执行落库单通道 | `exec --project P --parent-ext N --cmd '<完整命令>' [--action][--note 结论][--timeout S]`——命令输出自动落盘 + test 事件自动入库 + 原始输出自动挂证据（note=output，etype=file），探测/测试类命令一律走此通道，防"测了没记" |
-| 结论同步 | `lifecycle --project P --id <finding> --code open\|reproduced\|not-reproduced\|fixed\|reopened [--note]`——复测结论机读化（test note 以机读词开头：复现/未复现/已修复/部分修复/仍存在/待复测） |
+| 结论同步 | `lifecycle --project P --id <finding> --code open\|reproduced\|not-reproduced\|fixed\|reopened [--note]`——复测结论机读化（test note 以机读词开头：复现/未复现/已修复/部分修复/仍存在/待复测）；**test 事件入库（add/exec）即自动联动**：note 机读词映射 parent finding 生命周期（复现→reproduced、未复现→not-reproduced、已修复→fixed、部分修复/仍存在→reopened；待复测与散文 note 不触发），parent_ext 逗号分隔多 finding 全部联动、非 finding 跳过，已同值不重复写；留痕 tag=（test#N 自动）与手动 CLI 的（CLI）可区分 |
 | 登记漏洞 | `add --kind finding --req <请求原文\|-> --resp <响应原文\|-> ...`——**写入口强制：无 req/resp 直接拒绝**，自动挂 evidence（note=request/response）并在面板展示；报文确实已丢的加 `--waive-capture '原因'` 起草豁免（待人确认，确认前 lint 仍报 error） |
 | 证据 | `evidence --project P --event-id N --path F`（默认复制进套件；`--text` 直存文本；`--event-id 0`=项目级物料）；`evidence-move --id N --event-id M` 改挂归属 |
 | AI 推断 | `add ... --confidence high\|medium\|low`（推断类禁止 confirmed，一律 new 进待审） |

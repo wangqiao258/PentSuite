@@ -26,6 +26,15 @@ from pdb_core import (DB_PATH, VALID_STATUS, attach_evidence, connect,
 LIFE_CODES = ("open", "reproduced", "not-reproduced", "fixed", "reopened")
 # test note 机读结论词（复测时间轴聚合与 lifecycle 同步依赖；note 必须以其一开头）
 TEST_CONCLUSIONS = ("复现", "未复现", "已修复", "部分修复", "仍存在", "待复测")
+# test 结论 → finding lifecycle 自动联动映射（拍板 2026-10）：
+# 部分修复/仍存在=未根除，归 reopened；待复测=结论未定，不联动；映射外机读词与散文 note 一律不触发
+CONCLUSION_LIFECYCLE = {
+    "复现": "reproduced",
+    "未复现": "not-reproduced",
+    "已修复": "fixed",
+    "部分修复": "reopened",
+    "仍存在": "reopened",
+}
 
 
 def cmd_waive(a):
@@ -118,6 +127,7 @@ def cmd_verify(a):
 def cmd_exec(a):
     """执行落库单通道（recon 模式的推广）：AI 的探测/测试命令一律经本命令执行——
     输出强制落盘 + test 事件自动入库 + 原始输出自动挂证据，杜绝"测了没记"。
+    test 事件经 cmd_add 写入口落库，结论→lifecycle 自动联动随之继承（单通道，无需另行挂钩）。
     用法：pentdb.py exec --project P --parent-ext N -- <命令...>（-- 后接实际命令，非交互）"""
     import subprocess
     import uuid
@@ -195,6 +205,42 @@ def set_lifecycle(c, project, fid, code, note="", tag=""):
     c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
               (project, "lifecycle",
                f"#{fid} → {code}" + (f" ｜ {note}" if note else "") + tag, attrs["lifecycle_at"]))
+
+
+def sync_lifecycle_from_test(c, project, test_id, note, parent_ext=""):
+    """test 结论 → parent finding 生命周期自动同步（add/exec 两写入口共用）。
+    从 note 开头提取机读结论词（沿用 TEST_CONCLUSIONS，不另起一套）映射 lifecycle：
+    复现→reproduced / 未复现→not-reproduced / 已修复→fixed / 部分修复·仍存在→reopened；
+    「待复测」与散文 note 不触发。parent_ext 逗号分隔逐个处理，只对 kind=finding 生效；
+    目标 lifecycle 已同值时不重复写（幂等克制）。留痕 tag=（test#<id> 自动）。
+    返回发生联动的 finding id 列表（调用方据此决定是否 commit；打印 [link] 行）。"""
+    n = (note or "").strip()
+    code = ""
+    for w in TEST_CONCLUSIONS:
+        if n.startswith(w):
+            code = CONCLUSION_LIFECYCLE.get(w, "")  # 待复测等无映射词 -> 不联动
+            break
+    if not code:
+        return []
+    touched = []
+    for p in [x.strip() for x in (parent_ext or "").split(",") if x.strip()]:
+        if not p.isdigit():
+            continue
+        fid = int(p)
+        row = c.execute("SELECT kind, attrs FROM raw_events WHERE id=? AND project=?",
+                        (fid, project)).fetchone()
+        if not row or row["kind"] != "finding":
+            continue  # 只对 finding 生效：跳过不存在 id 与其他 kind
+        try:
+            cur = (json.loads(row["attrs"] or "{}") or {}).get("lifecycle", "")
+        except (TypeError, ValueError):
+            cur = ""
+        if cur == code:
+            continue  # 已同值：不重复写，避免 changelog 噪音
+        set_lifecycle(c, project, fid, code, tag=f"（test#{test_id} 自动）")
+        touched.append(fid)
+        print(f"[link] #{fid} 生命周期 -> {code}（test 结论自动同步）")
+    return touched
 
 
 def cmd_lifecycle(a):

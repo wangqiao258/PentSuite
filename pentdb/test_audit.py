@@ -99,6 +99,112 @@ class TestLifecycle(AuditBase):
                                                     code="reproduced", note=""))
 
 
+class TestLifecycleAutoSync(AuditBase):
+    """test 结论 → finding lifecycle 自动联动：机读词触发+留痕 tag、待复测/散文不触发、
+    已同值不重复写、parent_ext 多 id 全联动且跳过非 finding、exec 通道同样联动。"""
+
+    @staticmethod
+    def _finding(tag):
+        reqf, respf = _pkt_files("sync-" + tag)
+        pentdb.cmd_add(ns(kind="finding", value="http://t/sync-" + tag, title="联动-" + tag,
+                          source="ut", origin="agent", confidence="high", auto=False,
+                          req=reqf, resp=respf))
+        c = pentdb.connect()
+        fid = c.execute("SELECT id FROM raw_events WHERE project=? AND kind='finding' "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()[0]
+        c.close()
+        return fid
+
+    @staticmethod
+    def _add_test(value, note, parent_ext):
+        pentdb.cmd_add(ns(kind="test", value=value, title=value, note=note, source="ut",
+                          origin="agent", confidence="high", auto=True,
+                          status="confirmed", parent_ext=parent_ext))
+        c = pentdb.connect()
+        tid = c.execute("SELECT id FROM raw_events WHERE project=? AND kind='test' "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()[0]
+        c.close()
+        return tid
+
+    def _life(self, fid):
+        import json
+        c = pentdb.connect()
+        c.row_factory = sqlite3.Row
+        r = c.execute("SELECT attrs FROM raw_events WHERE id=?", (fid,)).fetchone()
+        c.close()
+        return (json.loads(r["attrs"] or "{}") or {}).get("lifecycle", "")
+
+    def _log_count(self, fid):
+        c = pentdb.connect()
+        n = c.execute("SELECT COUNT(*) FROM changelog WHERE project=? AND action='lifecycle' "
+                      "AND detail LIKE ?", (PROJ, f"#{fid} →%")).fetchone()[0]
+        c.close()
+        return n
+
+    def test_machine_word_triggers_and_tagged(self):
+        fid = self._finding("repro")
+        tid = self._add_test("复测动作A", "复现：三步稳定复现", str(fid))
+        self.assertEqual(self._life(fid), "reproduced")
+        c = pentdb.connect()
+        log = c.execute("SELECT detail FROM changelog WHERE project=? AND action='lifecycle' "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()["detail"]
+        c.close()
+        self.assertIn(f"#{fid} → reproduced", log)
+        self.assertIn(f"（test#{tid} 自动）", log)
+
+    def test_pending_word_no_trigger(self):
+        fid = self._finding("pending")
+        self._add_test("复测动作B", "待复测：安排下一轮", str(fid))
+        self.assertEqual(self._life(fid), "")
+
+    def test_prose_note_no_trigger(self):
+        fid = self._finding("prose")
+        self._add_test("复测动作C", "看了一眼，服务还在跑", str(fid))
+        self.assertEqual(self._life(fid), "")
+
+    def test_same_value_not_rewritten(self):
+        import json
+        fid = self._finding("idem")
+        self._add_test("复测动作D1", "复现：第一轮", str(fid))
+        c = pentdb.connect()
+        c.row_factory = sqlite3.Row
+        at1 = json.loads(c.execute("SELECT attrs FROM raw_events WHERE id=?",
+                                   (fid,)).fetchone()["attrs"])["lifecycle_at"]
+        n1 = self._log_count(fid)
+        c.close()
+        self._add_test("复测动作D2", "复现：第二轮", str(fid))
+        c = pentdb.connect()
+        c.row_factory = sqlite3.Row
+        at2 = json.loads(c.execute("SELECT attrs FROM raw_events WHERE id=?",
+                                   (fid,)).fetchone()["attrs"])["lifecycle_at"]
+        c.close()
+        self.assertEqual(at1, at2)  # 已同值：lifecycle_at 不刷新 = 未重复写
+        self.assertEqual(self._log_count(fid), n1)
+
+    def test_multi_parent_ext_synced_and_nonfinding_skipped(self):
+        fid_a = self._finding("multi-a")
+        fid_b = self._finding("multi-b")
+        other_tid = self._add_test("无关测试", "复现：无关事件（作为被跳过的非 finding 引用）", "")
+        self._add_test("复测动作E", "复现：多目标联动",
+                       f"{fid_a},{other_tid},{fid_b}")
+        self.assertEqual(self._life(fid_a), "reproduced")
+        self.assertEqual(self._life(fid_b), "reproduced")
+        c = pentdb.connect()
+        n_other = c.execute("SELECT COUNT(*) FROM changelog WHERE project=? AND "
+                            "action='lifecycle' AND detail LIKE ?",
+                            (PROJ, f"#{other_tid} →%")).fetchone()[0]
+        c.close()
+        self.assertEqual(n_other, 0)  # 非 finding id 被跳过
+
+    def test_exec_channel_syncs(self):
+        fid = self._finding("exec")
+        pentdb.cmd_exec(argparse.Namespace(
+            project=PROJ, parent_ext=str(fid), action="", title="",
+            note="已修复：补丁上线验证通过", detail="", severity="", confidence="high",
+            timeout=30, cmd="echo exec-sync-ut"))
+        self.assertEqual(self._life(fid), "fixed")
+
+
 class TestReconcileLint(AuditBase):
     def test_missing_evidence_file_is_error(self):
         c = pentdb.connect()

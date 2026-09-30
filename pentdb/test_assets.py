@@ -141,6 +141,36 @@ class RebuildMerge(unittest.TestCase):
         self.assertIn("scopes", d["attrs"])
 
 
+class EndpointHostBinding(unittest.TestCase):
+    """拍板锁定（2026-10）：endpoint 一律归 host——parent_ext 指向 service 时上溯归其 host；
+    父值为纯域名（库内无同名 host 实体）时保持 parent_atype=host，不再回写 domain。"""
+
+    @classmethod
+    def setUpClass(cls):
+        c = pentdb.connect()
+        c.execute("INSERT OR IGNORE INTO projects(name, created_at) VALUES(?,?)", (PROJ, pentdb.now()))
+        c.commit()
+        c.close()
+        add(kind="port", value="9.9.9.9:80", service="http", origin="human", status="confirmed")
+        add(kind="path", value="/svc-parent", parent_ext="9.9.9.9:80",
+            origin="human", status="confirmed")
+        add(kind="domain", value="web.example.com", origin="human", status="confirmed")
+        add(kind="path", value="/login", parent_ext="web.example.com",
+            origin="human", status="confirmed")
+
+    def test_service_parent_uptraces_to_host(self):
+        es = entities()
+        e = es[("endpoint", "9.9.9.9/svc-parent")]
+        self.assertEqual(e["parent_atype"], "host")
+        self.assertEqual(e["parent_akey"], "9.9.9.9")
+
+    def test_domain_parent_stays_host(self):
+        es = entities()
+        e = es[("endpoint", "web.example.com/login")]
+        self.assertEqual(e["parent_atype"], "host")
+        self.assertEqual(e["parent_akey"], "web.example.com")
+
+
 class AggregateSemantics(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

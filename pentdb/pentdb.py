@@ -45,9 +45,10 @@ from pdb_assets import (_norm_domain, _resolve_host, _split_hostport,
                         asset_is_stale, asset_review_state, cmd_add, cmd_init,
                         cmd_pending, cmd_query, cmd_rebuild_assets, cmd_review,
                         rebuild_assets)
-from pdb_findings import (LIFE_CODES, TEST_CONCLUSIONS, cmd_drop, cmd_evidence,
-                          cmd_evidence_move, cmd_exec, cmd_lifecycle, cmd_migrate,
-                          cmd_verify, cmd_waive, set_lifecycle)
+from pdb_findings import (CONCLUSION_LIFECYCLE, LIFE_CODES, TEST_CONCLUSIONS,
+                          cmd_drop, cmd_evidence, cmd_evidence_move, cmd_exec,
+                          cmd_lifecycle, cmd_migrate, cmd_verify, cmd_waive,
+                          set_lifecycle, sync_lifecycle_from_test)
 from pdb_report import (FINDING_MARKS, STATE_ICON, VERIFY_FRAME, _hints_menu,
                         _parse_finding_detail, _pentest_report, _term_in,
                         cmd_sop, load_sop_cfg, sop_report)
