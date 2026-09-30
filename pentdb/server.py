@@ -3,7 +3,6 @@
 """PentDB 人看面板（stdlib，零依赖）。端口 8766，避免与旧 assetdb 面板 8765 冲突。"""
 import json
 import os
-import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 

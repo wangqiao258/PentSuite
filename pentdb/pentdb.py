@@ -90,7 +90,6 @@ VALID_SEVERITY = ("crit", "high", "med", "low", "info")
 VALID_SCOPE = ("in", "out", "unknown")
 FACT_KINDS = ("domain", "port", "path", "param", "test")  # 机器可验证事实：允许 --auto 自动确认
 ASSET_KINDS = ("domain", "port", "path", "param")         # 资产类观测：参与实体归并
-VALID_ATYPES = ("domain", "host", "service", "endpoint")
 STALE_DAYS = 30  # 资产生命周期：last_seen 超过 N 天视为 stale
 
 SCHEMA = """
@@ -1129,8 +1128,6 @@ def cmd_kb(a):
 ROOT = os.path.dirname(BASE)  # 套件根（pentdb/ 的上一级）
 VENV_DIR = os.path.join(ROOT, ".venv")
 KB_CREDS = os.path.join(BASE, "kb", "creds.json")
-KB_ENV_KEYS = ("PENTEST_KB_DB_HOST", "PENTEST_KB_DB_PORT", "PENTEST_KB_DB_NAME",
-               "PENTEST_KB_DB_USER", "PENTEST_KB_DB_PASSWORD")
 
 
 def _venv_python():
