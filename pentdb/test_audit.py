@@ -18,8 +18,12 @@ import tempfile
 import unittest
 
 _TMPDIR = tempfile.mkdtemp(prefix="pentdb-audit-test-")
-os.environ["PENTDB_DB"] = os.path.join(_TMPDIR, "test.db")
+# setdefault：多模块同跑时先加载者建临时库、全套件共享隔离库（与 import 顺序无关）
+os.environ.setdefault("PENTDB_DB", os.path.join(_TMPDIR, "test.db"))
 import pentdb  # noqa: E402
+
+# journal 隔离：lint 对账不读真实执行流水，保证测试确定性
+pentdb.JOURNAL_DIR = os.path.join(tempfile.mkdtemp(prefix="pentdb-audit-test-"), "journal")
 
 PROJ = "audit-ut"
 

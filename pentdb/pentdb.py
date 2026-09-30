@@ -244,12 +244,20 @@ def connect():
         c.commit()
     except sqlite3.OperationalError:
         pass
+    try:
+        # changelog.actor：操作者（agent/human/机器采集），空=历史记录未知，不回填
+        c.execute("ALTER TABLE changelog ADD COLUMN actor TEXT DEFAULT ''")
+        c.commit()
+    except sqlite3.OperationalError:
+        pass
     return c
 
 
-def log_change(c, project, action, detail=""):
-    c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
-              (project, action, detail, now()))
+def log_change(c, project, action, detail="", actor="agent"):
+    """留痕追加。actor：agent=AI 经 CLI 操作（默认）/ human=人审动作 / 机器采集名。
+    人的决定（review/waive-confirm）必须显式传 human 系 actor，与 AI 操作可区分。"""
+    c.execute("INSERT INTO changelog(project, action, detail, at, actor) VALUES(?,?,?,?,?)",
+              (project, action, detail, now(), actor))
 
 
 def require_project(c, project):
@@ -689,7 +697,7 @@ def cmd_review(a):
     c.execute("UPDATE raw_events SET status=? WHERE id=?", (action, a.id))
     c.execute("INSERT INTO reviews(event_id, action, reviewer, note, at) VALUES(?,?,?,?,?)",
               (a.id, action, a.reviewer, a.note or "", now()))
-    log_change(c, a.project, "review", f"#{a.id} -> {action}")
+    log_change(c, a.project, "review", f"#{a.id} -> {action}", actor=a.reviewer or "human")
     c.commit()
     print(f"[ok] #{a.id} -> {action}")
 
@@ -788,20 +796,34 @@ def cmd_lint(a):
 
 
 def cmd_hook_install(a):
-    """生成/更新 <套件根>/.codebuddy/settings.json 的 PreToolUse journal hook（幂等）。
+    """生成/更新 PreToolUse journal hook 配置（幂等）。默认项目级
+    （<套件根>/.codebuddy/settings.json，仅本工作区生效）；--global 写用户级
+    ~/.workbuddy/settings.json（全工作区生效——渗透实际发生在目标工作目录，推荐）。
     只管理本套件自己的 journal hook 条目（按 journal.py 路径识别），不动其他配置。
     宿主安全机制：外部写入的 hooks 需在 /hooks 面板人工审查后才生效——AI 不得代批。"""
-    root = os.path.dirname(BASE)
-    cfg_dir = os.path.join(root, ".codebuddy")
-    os.makedirs(cfg_dir, exist_ok=True)
-    cfg_path = os.path.join(cfg_dir, "settings.json")
-    cfg = {}
-    if os.path.exists(cfg_path):
-        try:
-            with open(cfg_path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (ValueError, OSError):
-            cfg = {}
+    if getattr(a, "global_", False):
+        cfg_path = os.path.expanduser("~/.workbuddy/settings.json")
+        scope = "用户级（全工作区生效）"
+        cfg = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except (ValueError, OSError) as e:
+                sys.exit(f"[x] 用户级 settings.json 解析失败，拒绝覆盖（先手工修复）: {e}")
+    else:
+        root = os.path.dirname(BASE)
+        cfg_dir = os.path.join(root, ".codebuddy")
+        os.makedirs(cfg_dir, exist_ok=True)
+        cfg_path = os.path.join(cfg_dir, "settings.json")
+        scope = "项目级（仅本工作区生效）"
+        cfg = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except (ValueError, OSError):
+                cfg = {}
     py = os.path.abspath(sys.executable).replace("\\", "/")
     hook_py = os.path.join(BASE, "hooks", "journal.py").replace("\\", "/")
     entry = {"matcher": "Bash|PowerShell",
@@ -817,9 +839,31 @@ def cmd_hook_install(a):
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
         f.write("\n")
-    print("[ok] 已写入", cfg_path)
+    print(f"[ok] 已写入 {cfg_path}（{scope}）")
     print("    生效步骤：宿主 /hooks 面板审查确认（外部修改的 hooks 必须经人工审查）")
     print("    验证：生效后任意命令执行一次，检查 pentdb/data/journal/<日期>.log 是否追加")
+    if getattr(a, "global_", False):
+        # 全局部署后清理项目级旧配置，避免双份（同命令宿主会去重，但留着易困惑）
+        proj_cfg = os.path.join(os.path.dirname(BASE), ".codebuddy", "settings.json")
+        try:
+            if os.path.exists(proj_cfg):
+                with open(proj_cfg, encoding="utf-8") as f:
+                    pc = json.load(f)
+                ph = pc.get("hooks", {}).get("PreToolUse", [])
+                rest = [m for m in ph
+                        if not any("journal.py" in (h.get("command") or "")
+                                   for h in m.get("hooks", []))]
+                if rest:
+                    pc.setdefault("hooks", {})["PreToolUse"] = rest
+                    with open(proj_cfg, "w", encoding="utf-8") as f:
+                        json.dump(pc, f, ensure_ascii=False, indent=2)
+                        f.write("\n")
+                    print("[ok] 项目级旧 journal hook 条目已移除（其余配置保留）:", proj_cfg)
+                else:
+                    os.remove(proj_cfg)
+                    print("[ok] 项目级 hook 配置已移除（全局已覆盖）:", proj_cfg)
+        except OSError:
+            pass
 
 
 def cmd_migrate(a):
@@ -1225,7 +1269,7 @@ def cmd_waive(a):
             return
         c.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
         log_change(c, a.project, "waive-confirm",
-                   f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}")
+                   f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}", actor="human")
         c.commit()
         print(f"[ok] wid={wid} 豁免已确认生效（#{row['event_id']} {row['term']}）")
         return
@@ -1550,8 +1594,10 @@ def main():
                     help="跳过执行流水（journal）对账——套件开发/非渗透场景用")
     sp.set_defaults(fn=cmd_lint)
 
-    sp = sub.add_parser("hook-install", help="生成 PreToolUse journal hook 配置（.codebuddy/settings.json；"
-                                             "写入后需在宿主 /hooks 面板人工审查才生效）")
+    sp = sub.add_parser("hook-install", help="生成 PreToolUse journal hook 配置（默认项目级；"
+                                             "--global 写用户级全工作区生效。写入后需在宿主 /hooks 面板人工审查才生效）")
+    sp.add_argument("--global", dest="global_", action="store_true",
+                    help="写用户级 ~/.workbuddy/settings.json（渗透发生在目标工作目录，推荐全局）")
     sp.set_defaults(fn=cmd_hook_install)
 
     sp = sub.add_parser("rebuild-assets", help="从资产类观测重建 assets 实体层（幂等；add/recon 后自动触发）")

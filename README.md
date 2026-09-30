@@ -44,7 +44,7 @@ PentSuite/
 
 - `raw_events`（append-only 观测流）：kind: domain/port/path/param/finding/osint/note/test/suggestion；source 必填；AI（origin=agent）必须带 confidence 且不得置 confirmed（--auto 仅限机器事实 domain/port/path/param/test）
 - `assets`（纯派生实体层）：观测流之上的归并层，对齐成熟 ASM 产品的"观测→实体→展示"三层。按规范 akey 归并为四类实体——domain（小写 FQDN，parent=注册域）、host（IP/主机名，从 port 观测提取）、service（host:port，parent=host）、endpoint（host+path，param 并入 attrs.params 不再单独成行）；attrs 聚合端口/技术栈/服务/参数/状态码/scope；first_seen/last_seen 由 created_at/updated_at 派生。`rebuild-assets` 幂等全量重建（add/recon 后自动触发），人审聚合与生命周期（last_seen 超 30 天=stale）在面板侧实时计算，不落库
-- `pending_tests`（legacy 空表，阶段制退役后不再写入）/ `waives` / `reviews` / `changelog`：只追加留痕
+- `pending_tests`（legacy 空表，阶段制退役后不再写入）/ `waives` / `reviews` / `changelog`（留痕含 actor：agent=AI 经 CLI / human=人审动作，面板时间线可辨操作者）：只追加留痕
 - 状态机 `new →(人审)→ confirmed/rejected`；报告与攻击建议只引用 confirmed；实体的"有待审/已确认/已驳回"是其观测的人审聚合，与生命周期互相独立（对应成熟产品的归属态/人审态分离）
 - finding detail 七段约定：`【描述】【请求】【payload】【判据】【原因】【手工验证】【修复】`——【请求】是**测试用例（构造物）**，未实测须标"待验证"；**事实数据包 = evidence 的 request/response 对**（`add --kind finding --req/--resp` **写入口强制**，无报文直接拒绝；豁免走 `--waive-capture` 起草 + 人工 `waive --wid N --confirm` 确认；lint 兜底：漏洞无 req/resp 证据=error）。【判据】=基线 vs 复现的判定标准。test 事件 **value=动作、note=结论**
 - 物料归属三层：**项目级**（凭据表/报告/访问说明，`evidence --event-id 0`）｜**finding 级**（该漏洞自己的 req/resp 证据）｜**实体级**（资产实体层聚合观测）。归属判定=复测时必须用到；认证依赖禁止虚构
@@ -69,7 +69,7 @@ PentSuite/
 | SOP 提示 | `sop --project P`（扁平提示清单：when 触发语义 + check 提示术语 + 状态参考，AI 语义判断命中后对照自查；**提示层非门禁、非义务，不设豁免**，覆盖度由 AI 显式申报、人背书；无阶段概念） |
 | 豁免 | `waive --project P --id N --term T --reason R`（只作用于具体事件：报文豁免挂 finding、归因豁免挂 test；起草态不生效，人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
 | 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn、**执行流水对账：journal 探测类命令无对应 test 事件=error（测了没记），`--no-journal` 开发场景跳过**） |
-| hook 部署 | `hook-install`（生成 PreToolUse journal hook 到 `.codebuddy/settings.json`；**写入后需在宿主 /hooks 面板人工审查才生效**） |
+| hook 部署 | `hook-install`（生成 PreToolUse journal hook；默认项目级仅本工作区生效，**`--global` 写用户级全工作区生效——渗透发生在目标工作目录，推荐**；**写入后需在宿主 /hooks 面板人工审查才生效**） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |
 | 采集 | `recon --project P --domain D [--single][--proxy]`；`js --project P` |
@@ -83,7 +83,7 @@ AI 播报约定：**仅批次产生新待审项时**播报（链接+新增数+�
 
 ## 执行流水对账（journal，堵"测了没记"）
 
-AI 拥有裸 shell，exec 是建议走的门而非唯一的门。宿主工具链拦截补上这一层：`hook-install` 部署 PreToolUse hook（matcher `Bash|PowerShell`），宿主执行任何命令前先落一行流水到 `pentdb/data/journal/<日期>.log`；`lint` 收尾对账——journal 里探测类命令（含 URL 或 curl/nmap/sqlmap 等工具词）在 test 事件中找不到对应记录 = **error**（`pentdb.py` 自身调用是记账/自录通道天然豁免；exec 落库 source=完整命令，天然平账）。强制力在宿主 harness 而非 AI 自觉：沙箱内命令必经 Bash/PowerShell 工具，绕过在结构上不存在；hook 配置外部修改须经宿主 `/hooks` 面板人工审查才生效，AI 无法代批或静默篡改。
+AI 拥有裸 shell，exec 是建议走的门而非唯一的门。宿主工具链拦截补上这一层：`hook-install --global` 部署 PreToolUse hook（matcher `Bash|PowerShell`，用户级全工作区生效），宿主执行任何命令前先落一行流水到 `pentdb/data/journal/<日期>.log`；`lint` 收尾对账——journal 里探测类命令（含 URL 或 curl/nmap/sqlmap 等工具词）在 test 事件中找不到对应记录 = **error**（`pentdb.py` 自身调用是记账/自录通道天然豁免；exec 落库 source=完整命令，天然平账）。强制力在宿主 harness 而非 AI 自觉：沙箱内命令必经 Bash/PowerShell 工具，绕过在结构上不存在；hook 配置外部修改须经宿主 `/hooks` 面板人工审查才生效，AI 无法代批或静默篡改。
 
 ## 快速开始
 

@@ -13,9 +13,8 @@ import os
 import tempfile
 import unittest
 
-# 必须在 import pentdb 前设置：测试用独立临时库，绝不触碰真实数据
-_TMPDB = os.path.join(tempfile.mkdtemp(prefix="pentdb-assets-test-"), "test.db")
-os.environ["PENTDB_DB"] = _TMPDB
+# 必须在 import pentdb 前设置；setdefault 保证多模块同跑时与 import 顺序无关
+os.environ.setdefault("PENTDB_DB", os.path.join(tempfile.mkdtemp(prefix="pentdb-assets-test-"), "test.db"))
 import pentdb  # noqa: E402
 
 PROJ = "assets-ut"

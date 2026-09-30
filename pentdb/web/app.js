@@ -470,8 +470,8 @@ async function loadTimeline(){
   const d=await api("timeline",{project:PROJECT});
   $("#tl-events").innerHTML="<tr><th>时间</th><th>类型</th><th>值</th><th>状态</th><th>来源</th></tr>"+
     d.events.map(r=>`<tr><td class="muted" title="${esc(r.created_at)}">${r.created_at}</td><td>${kindTag(r.kind)}</td><td title="${esc(r.value)}">${esc(r.value)}</td><td>${tag(r.status)}</td><td class="src muted" title="${esc(r.source)}">${esc(r.source).slice(0,90)}</td></tr>`).join("");
-  $("#tl-changes").innerHTML="<tr><th>时间</th><th>动作</th><th>明细</th></tr>"+
-    d.changes.map(r=>`<tr><td class="muted" title="${esc(r.at)}">${r.at}</td><td title="${esc(r.action)}">${esc(r.action)}</td><td title="${esc(r.detail)}">${esc(r.detail).slice(0,120)||"—"}</td></tr>`).join("");
+  $("#tl-changes").innerHTML="<tr><th>时间</th><th>动作</th><th>操作者</th><th>明细</th></tr>"+
+    d.changes.map(r=>`<tr><td class="muted" title="${esc(r.at)}">${r.at}</td><td title="${esc(r.action)}">${esc(r.action)}</td><td class="muted">${esc(r.actor||"hist")}</td><td title="${esc(r.detail)}">${esc(r.detail).slice(0,120)||"—"}</td></tr>`).join("");
 }
 
 function srcGroup(s){

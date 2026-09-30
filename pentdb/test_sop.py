@@ -13,10 +13,14 @@ import os
 import tempfile
 import unittest
 
-# 必须在 import pentdb 前设置：测试用独立临时库，绝不触碰真实数据
-_TMPDB = os.path.join(tempfile.mkdtemp(prefix="pentdb-test-"), "test.db")
-os.environ["PENTDB_DB"] = _TMPDB
+# 必须在 import pentdb 前设置：setdefault 保证多模块同跑时先加载者建临时库、
+# 全套件共享隔离库，与 import 顺序无关（之前 ["PENTDB_DB"]= 覆盖写法只有
+# 恰好先加载的模块生效，实测踩过重跑撞真实库）
+os.environ.setdefault("PENTDB_DB", os.path.join(tempfile.mkdtemp(prefix="pentdb-test-"), "test.db"))
 import pentdb  # noqa: E402
+
+# journal 隔离：lint 对账不读真实执行流水，保证测试确定性
+pentdb.JOURNAL_DIR = os.path.join(tempfile.mkdtemp(prefix="pentdb-test-"), "journal")
 
 PROJ = "unittest-proj"
 

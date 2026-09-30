@@ -202,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT id, kind, value, status, origin, source, created_at FROM raw_events "
                     "WHERE project=? ORDER BY created_at DESC, id DESC LIMIT 100", (p,)))
                 changes = rows_to_dicts(c.execute(
-                    "SELECT action, detail, at FROM changelog WHERE project=? "
+                    "SELECT action, detail, at, actor FROM changelog WHERE project=? "
                     "ORDER BY id DESC LIMIT 50", (p,)))
                 self._json({"events": events, "changes": changes})
             elif u.path == "/api/findings":
@@ -394,8 +394,8 @@ class Handler(BaseHTTPRequestHandler):
                 detail = ("批量 " if len(eids) > 1 else "") + f"{action} #{','.join(map(str, eids))}"
                 if note:
                     detail += f" ｜ {note}"
-                c.execute("INSERT INTO changelog(project, action, detail, at) VALUES(?,?,?,?)",
-                          (proj, "review", detail + "（面板）", now))
+                c.execute("INSERT INTO changelog(project, action, detail, at, actor) VALUES(?,?,?,?,?)",
+                          (proj, "review", detail + "（面板）", now, "human"))
             c.commit()
             self._json({"ok": True, "updated": ok, "missing": missing})
         finally:

@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 
+# 多模块同跑时与 import 顺序无关：先加载者建隔离库，全套件共享（必须先于 import pentdb）
+os.environ.setdefault("PENTDB_DB", os.path.join(tempfile.mkdtemp(prefix="pentdb-journal-test-"), "test.db"))
 import pentdb
 
 
