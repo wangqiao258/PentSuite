@@ -26,6 +26,62 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 # 数据根唯一：默认在项目副本 data/ 下；skill 自包含副本通过 PENTDB_DB 指向同一数据文件
 DB_PATH = os.environ.get("PENTDB_DB") or os.path.join(BASE, "data", "pentdb.db")
 SOP_CFG = os.environ.get("PENTDB_SOP") or os.path.join(BASE, "sop", "default.json")
+# 执行流水（journal）：PreToolUse hook（pentdb/hooks/journal.py）落盘的宿主命令流水，
+# lint 收尾对账"测了没记"——journal 里探测类命令在 test 事件找不到对应记录即 error。
+JOURNAL_DIR = os.path.join(BASE, "data", "journal")
+PROBE_TOOL_RE = re.compile(
+    r"\b(curl|nmap|sqlmap|nikto|gobuster|ffuf|feroxbuster|dirsearch|nuclei|hydra|"
+    r"wfuzz|dirb|whatweb|wafw00f|testssl)\b", re.I)
+URL_RE = re.compile(r"https?://", re.I)
+
+
+def probe_like(cmd):
+    """journal 命令是否探测/测试类：含 URL 或已知探测工具词即命中。
+    pentdb.py 自身调用（exec/add/recon/js）是记账/自录通道，天然豁免。"""
+    if not cmd or "pentdb.py" in cmd.replace("/", "\\").replace("\\\\", "\\"):
+        return False
+    return bool(URL_RE.search(cmd) or PROBE_TOOL_RE.search(cmd))
+
+
+def journal_unmatched(c):
+    """执行流水对账：journal 中探测类命令逐条与全库 test 事件 source 比对
+    （命令串 ⊆ source 恒可平账；source ⊆ 命令串须 source≥12 字符才采信）。
+    返回 {命令: 出现次数}（仅未落库的）。"""
+    if not os.path.isdir(JOURNAL_DIR):
+        return {}
+    recs = []
+    for fn in sorted(os.listdir(JOURNAL_DIR)):
+        if not fn.endswith(".log"):
+            continue
+        try:
+            with open(os.path.join(JOURNAL_DIR, fn), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        cmd = (json.loads(line).get("cmd") or "").strip()
+                    except ValueError:
+                        continue
+                    if cmd:
+                        recs.append(cmd)
+        except OSError:
+            continue
+    if not recs:
+        return {}
+    sources = [r[0] or "" for r in c.execute(
+        "SELECT source FROM raw_events WHERE kind='test'")]
+    from collections import Counter
+    unmatched = Counter()
+    for cmd in recs:
+        # cmd ⊆ source（完全一致/exec 记长 source）恒可平账；source ⊆ cmd 方向
+        # 须 source 足够长（≥12 字符）才采信——库内存在 's'/'ut' 等极短手填 source，
+        # 无长度下限会让所有命令被误判"已记录"（实测踩过）
+        if probe_like(cmd) and not any(
+                s and (cmd in s or (len(s) >= 12 and s in cmd))
+                for s in sources):
+            unmatched[cmd] += 1
+    return dict(unmatched)
 
 VALID_KINDS = ("domain", "port", "path", "param", "finding", "osint", "note", "test", "suggestion")
 VALID_STATUS = ("new", "confirmed", "rejected")
@@ -638,7 +694,7 @@ def cmd_review(a):
     print(f"[ok] #{a.id} -> {action}")
 
 
-def lint_report(c, project):
+def lint_report(c, project, journal_check=True):
     """lint 扫描（面板/CLI 共用），返回 errors/warns 列表。"""
     errors, warns = [], []
     # test 事件缺 parent_ext 无补录通道（test 是事件流，--update 不适用），
@@ -709,19 +765,61 @@ def lint_report(c, project):
         warns.append("待人工确认的豁免 " + "、".join(
             f"wid={w['id']}(#{w['event_id']} {w['term']})" for w in draft_waives)
             + " ——起草态不生效，人工确认：waive --wid N --confirm")
+    # 对账③：执行流水对账（journal 有探测类命令、test 事件里无对应记录 = 测了没记）
+    if journal_check:
+        for cmd, n in sorted(journal_unmatched(c).items(),
+                             key=lambda kv: -kv[1]):
+            shown = cmd if len(cmd) <= 90 else cmd[:87] + "…"
+            errors.append(f"执行流水未落库×{n}: {shown}（journal 有记录但无对应 test 事件"
+                          f"——走 exec 单通道补记，或 add --kind test 登记结论）")
     return {"errors": errors, "warns": warns}
 
 
 def cmd_lint(a):
     c = connect()
     require_project(c, a.project)
-    rep = lint_report(c, a.project)
+    rep = lint_report(c, a.project, journal_check=not getattr(a, "no_journal", False))
     for e in rep["errors"]:
         print(f"ERROR {e}")
     for w in rep["warns"]:
         print(f"WARN  {w}")
     print(f"-- lint: {len(rep['errors'])} error, {len(rep['warns'])} warn")
     sys.exit(1 if rep["errors"] else 0)
+
+
+def cmd_hook_install(a):
+    """生成/更新 <套件根>/.codebuddy/settings.json 的 PreToolUse journal hook（幂等）。
+    只管理本套件自己的 journal hook 条目（按 journal.py 路径识别），不动其他配置。
+    宿主安全机制：外部写入的 hooks 需在 /hooks 面板人工审查后才生效——AI 不得代批。"""
+    root = os.path.dirname(BASE)
+    cfg_dir = os.path.join(root, ".codebuddy")
+    os.makedirs(cfg_dir, exist_ok=True)
+    cfg_path = os.path.join(cfg_dir, "settings.json")
+    cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (ValueError, OSError):
+            cfg = {}
+    py = os.path.abspath(sys.executable).replace("\\", "/")
+    hook_py = os.path.join(BASE, "hooks", "journal.py").replace("\\", "/")
+    entry = {"matcher": "Bash|PowerShell",
+             "hooks": [{"type": "command",
+                        "command": '"%s" "%s"' % (py, hook_py),
+                        "timeout": 10}]}
+    hooks = cfg.setdefault("hooks", {})
+    pre = [m for m in hooks.get("PreToolUse", [])
+           if not any("journal.py" in (h.get("command") or "")
+                      for h in m.get("hooks", []))]
+    pre.append(entry)
+    hooks["PreToolUse"] = pre
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    print("[ok] 已写入", cfg_path)
+    print("    生效步骤：宿主 /hooks 面板审查确认（外部修改的 hooks 必须经人工审查）")
+    print("    验证：生效后任意命令执行一次，检查 pentdb/data/journal/<日期>.log 是否追加")
 
 
 def cmd_migrate(a):
@@ -1447,7 +1545,14 @@ def main():
     sp.add_argument("--note", default="")
     sp.set_defaults(fn=cmd_review)
 
-    sp = sub.add_parser("lint"); sp.add_argument("--project", required=True); sp.set_defaults(fn=cmd_lint)
+    sp = sub.add_parser("lint"); sp.add_argument("--project", required=True)
+    sp.add_argument("--no-journal", action="store_true",
+                    help="跳过执行流水（journal）对账——套件开发/非渗透场景用")
+    sp.set_defaults(fn=cmd_lint)
+
+    sp = sub.add_parser("hook-install", help="生成 PreToolUse journal hook 配置（.codebuddy/settings.json；"
+                                             "写入后需在宿主 /hooks 面板人工审查才生效）")
+    sp.set_defaults(fn=cmd_hook_install)
 
     sp = sub.add_parser("rebuild-assets", help="从资产类观测重建 assets 实体层（幂等；add/recon 后自动触发）")
     sp.add_argument("--project", required=True)

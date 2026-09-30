@@ -14,3 +14,4 @@ dist/
 
 # 工作区私有配置
 .workbuddy/
+.codebuddy/

@@ -26,6 +26,8 @@ PentSuite/
 │  ├─ test_assets.py       资产实体层单测（key 规范化/归并/聚合语义）
 │  ├─ test_exec.py         exec 执行落库单通道单测
 │  ├─ test_audit.py        报文强制/豁免/lint 门禁对账单测
+│  ├─ test_journal.py      执行流水对账单测（probe 启发式/平账语义）
+│  ├─ hooks/journal.py     PreToolUse hook：宿主命令流水落盘（hook-install 部署）
 │  ├─ kb/                  经验层单元（pentest-kb，Supabase 云端，强制脱敏）
 │  │  ├─ kb.py             经验库逻辑（CLI kb-* 子命令的实现）
 │  │  ├─ schema.sql        经验库建表 DDL（自建 Supabase 时执行）
@@ -66,7 +68,8 @@ PentSuite/
 | 查询 | `query --project P [--kind][--status]` |
 | SOP 提示 | `sop --project P`（扁平提示清单：when 触发语义 + check 提示术语 + 状态参考，AI 语义判断命中后对照自查；**提示层非门禁、非义务，不设豁免**，覆盖度由 AI 显式申报、人背书；无阶段概念） |
 | 豁免 | `waive --project P --id N --term T --reason R`（只作用于具体事件：报文豁免挂 finding、归因豁免挂 test；起草态不生效，人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
-| 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn） |
+| 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn、**执行流水对账：journal 探测类命令无对应 test 事件=error（测了没记），`--no-journal` 开发场景跳过**） |
+| hook 部署 | `hook-install`（生成 PreToolUse journal hook 到 `.codebuddy/settings.json`；**写入后需在宿主 /hooks 面板人工审查才生效**） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |
 | 采集 | `recon --project P --domain D [--single][--proxy]`；`js --project P` |
@@ -77,6 +80,10 @@ PentSuite/
 目标总览（卡片点击跳转筛选）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+复制为 curl）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜报告·收尾（assets/pentest 模板+lint 门禁+整库备份）。SOP 提示已退役为 AI-only（CLI `sop`），面板不再展示
 
 AI 播报约定：**仅批次产生新待审项时**播报（链接+新增数+待审数+重点）；纯 --auto 批次不打扰。
+
+## 执行流水对账（journal，堵"测了没记"）
+
+AI 拥有裸 shell，exec 是建议走的门而非唯一的门。宿主工具链拦截补上这一层：`hook-install` 部署 PreToolUse hook（matcher `Bash|PowerShell`），宿主执行任何命令前先落一行流水到 `pentdb/data/journal/<日期>.log`；`lint` 收尾对账——journal 里探测类命令（含 URL 或 curl/nmap/sqlmap 等工具词）在 test 事件中找不到对应记录 = **error**（`pentdb.py` 自身调用是记账/自录通道天然豁免；exec 落库 source=完整命令，天然平账）。强制力在宿主 harness 而非 AI 自觉：沙箱内命令必经 Bash/PowerShell 工具，绕过在结构上不存在；hook 配置外部修改须经宿主 `/hooks` 面板人工审查才生效，AI 无法代批或静默篡改。
 
 ## 快速开始
 
@@ -107,7 +114,7 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 python pentdb/pentdb.py init --project demo
 python pentdb/pentdb.py panel --project demo      # 浏览器打开输出的 URL
 python pentdb/pentdb.py kb search --keyword 测试   # 未配凭据时返回友好提示
-cd pentdb && python -m unittest test_sop test_assets test_exec test_audit   # 38 用例回归
+cd pentdb && python -m unittest test_sop test_assets test_exec test_audit test_journal   # 48 用例回归
 ```
 
 - 数据存放：事实库 `pentdb/data/pentdb.db` 为本地文件，clone 后不存在、init 按需生成；凭据模板 `pentdb/kb/creds.json` 随仓库自带（空值），填入真实值后仅存本机、套件不会自动上传任何内容
