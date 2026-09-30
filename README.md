@@ -16,8 +16,8 @@ AI 落库与聚合、人看面板与审核的渗透测试**单一项目**。三�
 ```
 PentSuite/
 ├─ pentdb/                 套件运行时（内部全部 __file__ 相对寻址，可整体搬移）
-│  ├─ pentdb.py            CLI：init/panel/add/exec/lifecycle/query/review/pending/lint/rebuild-assets/sop/waive/
-│  │                       migrate/report/drop/evidence/evidence-move/verify/recon/js/serve/bootstrap
+│  ├─ pentdb.py            CLI：init/panel/add/exec/lifecycle/query/review/pending/lint/hook-install/rebuild-assets/
+│  │                       sop/waive/migrate/report/drop/evidence/evidence-move/verify/recon/js/serve/bootstrap
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；六视图全交互联动）
 │  │                       web/ 三文件：index.html + style.css + app.js（server.py 白名单静态路由）
@@ -60,7 +60,7 @@ PentSuite/
 | 重扫更新 | 同 kind+value 重复时 `add --update`：刷新观测字段并更新 last_seen（updated_at），状态与人审结论保留 |
 | 重建实体层 | `rebuild-assets --project P`（幂等；add/recon 资产类写入后自动触发，一般无需手跑） |
 | 登记测试 | `add --kind test --value "动作" --note "结论" --parent-ext <id>[,id2] --source "命令" --auto --status confirmed --confidence high`（value=动作、note=结论） |
-| 执行落库单通道 | `exec --project P --parent-ext N --cmd '<完整命令>' [--action][--note 结论][--timeout S]`——命令输出自动落盘 + test 事件自动入库 + 原始输出自动挂证据（etype=output/file），探测/测试类命令一律走此通道，防"测了没记" |
+| 执行落库单通道 | `exec --project P --parent-ext N --cmd '<完整命令>' [--action][--note 结论][--timeout S]`——命令输出自动落盘 + test 事件自动入库 + 原始输出自动挂证据（note=output，etype=file），探测/测试类命令一律走此通道，防"测了没记" |
 | 结论同步 | `lifecycle --project P --id <finding> --code open\|reproduced\|not-reproduced\|fixed\|reopened [--note]`——复测结论机读化（test note 以机读词开头：复现/未复现/已修复/部分修复/仍存在/待复测） |
 | 登记漏洞 | `add --kind finding --req <请求原文\|-> --resp <响应原文\|-> ...`——**写入口强制：无 req/resp 直接拒绝**，自动挂 evidence（note=request/response）并在面板展示；报文确实已丢的加 `--waive-capture '原因'` 起草豁免（待人确认，确认前 lint 仍报 error） |
 | 证据 | `evidence --project P --event-id N --path F`（默认复制进套件；`--text` 直存文本；`--event-id 0`=项目级物料）；`evidence-move --id N --event-id M` 改挂归属 |
@@ -69,7 +69,7 @@ PentSuite/
 | SOP 提示 | `sop --project P`（扁平提示清单：when 触发语义 + check 提示术语 + 状态参考，AI 语义判断命中后对照自查；**提示层非门禁、非义务，不设豁免**，覆盖度由 AI 显式申报、人背书；无阶段概念） |
 | 豁免 | `waive --project P --id N --term T --reason R`（只作用于具体事件：报文豁免挂 finding、归因豁免挂 test；起草态不生效，人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
 | 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词=warn、**执行流水对账：journal 探测类命令无对应 test 事件=error（测了没记），`--no-journal` 开发场景跳过**） |
-| hook 部署 | `hook-install`（生成 PreToolUse journal hook；默认项目级仅本工作区生效，**`--global` 写用户级全工作区生效——渗透发生在目标工作目录，推荐**；**写入后需在宿主 /hooks 面板人工审查才生效**） |
+| hook 部署 | `hook-install`（生成 PreToolUse journal hook；默认项目级仅本工作区生效，**`--global` 写用户级全工作区生效——渗透发生在目标工作目录，推荐**；CLI 终端版需 `/hooks` 面板审查，桌面版实测动态加载即生效，验证=新会话跑命令查 journal） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |
 | 采集 | `recon --project P --domain D [--single][--proxy]`；`js --project P` |
@@ -83,7 +83,7 @@ AI 播报约定：**仅批次产生新待审项时**播报（链接+新增数+�
 
 ## 执行流水对账（journal，堵"测了没记"）
 
-AI 拥有裸 shell，exec 是建议走的门而非唯一的门。宿主工具链拦截补上这一层：`hook-install --global` 部署 PreToolUse hook（matcher `Bash|PowerShell`，用户级全工作区生效），宿主执行任何命令前先落一行流水到 `pentdb/data/journal/<日期>.log`；`lint` 收尾对账——journal 里探测类命令（含 URL 或 curl/nmap/sqlmap 等工具词）在 test 事件中找不到对应记录 = **error**（`pentdb.py` 自身调用是记账/自录通道天然豁免；exec 落库 source=完整命令，天然平账）。强制力在宿主 harness 而非 AI 自觉：沙箱内命令必经 Bash/PowerShell 工具，绕过在结构上不存在；hook 配置外部修改须经宿主 `/hooks` 面板人工审查才生效，AI 无法代批或静默篡改。
+AI 拥有裸 shell，exec 是建议走的门而非唯一的门。宿主工具链拦截补上这一层：`hook-install --global` 部署 PreToolUse hook（matcher `Bash|PowerShell`，用户级全工作区生效），宿主执行任何命令前先落一行流水到 `pentdb/data/journal/<日期>.log`；`lint` 收尾对账——journal 里探测类命令（含 URL 或 curl/nmap/sqlmap 等工具词）在 test 事件中找不到对应记录 = **error**（`pentdb.py` 自身调用是记账/自录通道天然豁免；exec 落库 source=完整命令，天然平账）。强制力在宿主 harness 而非 AI 自觉：沙箱内命令必经 Bash/PowerShell 工具，绕过在结构上不存在。生效方式：CLI 终端版经 `/hooks` 面板审查（配置外部修改需人工确认，AI 无法代批或静默篡改）；桌面版实测免审动态生效（验证=新会话跑任意命令后查 journal）。
 
 ## 快速开始
 
@@ -114,7 +114,7 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 python pentdb/pentdb.py init --project demo
 python pentdb/pentdb.py panel --project demo      # 浏览器打开输出的 URL
 python pentdb/pentdb.py kb search --keyword 测试   # 未配凭据时返回友好提示
-cd pentdb && python -m unittest test_sop test_assets test_exec test_audit test_journal   # 48 用例回归
+cd pentdb && python -m unittest test_sop test_assets test_exec test_audit test_journal   # 51 用例回归
 ```
 
 - 数据存放：事实库 `pentdb/data/pentdb.db` 为本地文件，clone 后不存在、init 按需生成；凭据模板 `pentdb/kb/creds.json` 随仓库自带（空值），填入真实值后仅存本机、套件不会自动上传任何内容
