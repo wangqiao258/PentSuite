@@ -9,10 +9,14 @@ from urllib.parse import urlparse, parse_qs
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "data", "pentdb.db")
 WEB = os.path.join(BASE, "web", "index.html")
-# 静态资源白名单（web/ 目录拆分后：html/css/js 三文件）
+# 静态资源白名单（web/ 目录按视图域拆分：html/css + 5 个 app.*.js）
 STATIC = {
     "/style.css": ("style.css", "text/css; charset=utf-8"),
-    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/app.core.js": ("app.core.js", "text/javascript; charset=utf-8"),
+    "/app.findings.js": ("app.findings.js", "text/javascript; charset=utf-8"),
+    "/app.assets.js": ("app.assets.js", "text/javascript; charset=utf-8"),
+    "/app.queue.js": ("app.queue.js", "text/javascript; charset=utf-8"),
+    "/app.report.js": ("app.report.js", "text/javascript; charset=utf-8"),
 }
 
 
@@ -55,6 +59,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = f.read().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -65,6 +70,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = f.read().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -255,7 +261,10 @@ class Handler(BaseHTTPRequestHandler):
                 p = q.get("project", [""])[0]
                 template = q.get("template", ["assets"])[0]
                 import pentdb
-                rep = pentdb.lint_report(c, p)
+                try:
+                    rep = pentdb.lint_report(c, p)
+                except Exception as e:  # journal/lint 对账读盘异常：返回 500 JSON，不打断连接
+                    return self._json({"error": "lint 对账失败：" + str(e)}, 500)
                 if rep["errors"] and q.get("force", ["0"])[0] != "1":
                     self._json({"error": f"lint 有 {len(rep['errors'])} error，拒绝出报告——"
                                          "先修复或经人工确认豁免（带错出报告需人工加 force=1）",

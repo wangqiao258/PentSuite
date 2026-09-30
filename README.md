@@ -25,7 +25,7 @@ PentSuite/
 │  ├─ pdb_tooling.py       工具域：panel/hook-install/recon/js/kb/bootstrap
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；六视图全交互联动）
-│  │                       web/ 三文件：index.html + style.css + app.js（server.py 白名单静态路由）
+│  │                       web/ 七文件：index.html + style.css + 5 个 app.*.js（core/findings/assets/queue/report，按视图域拆分；boot() 在 app.report.js 尾部触发；server.py 白名单静态路由）
 │  ├─ sop/default.json     SOP 提示清单（扁平 hints：when 触发语义 + check 提示术语，AI 查漏补缺用，无阶段）
 │  ├─ test_sop.py          核心逻辑单测（stdlib unittest）
 │  ├─ test_assets.py       资产实体层单测（key 规范化/归并/聚合语义）
