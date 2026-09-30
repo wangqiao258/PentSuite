@@ -16,14 +16,16 @@ AI 落库与聚合、人看面板与审核的渗透测试**单一项目**。三�
 ```
 PentSuite/
 ├─ pentdb/                 套件运行时（内部全部 __file__ 相对寻址，可整体搬移）
-│  ├─ pentdb.py            CLI：init/panel/add/exec/lifecycle/query/review/lint/rebuild-assets/sop/waive/
-│  │                       migrate/report/drop/evidence/verify/recon/js/serve
+│  ├─ pentdb.py            CLI：init/panel/add/exec/lifecycle/query/review/pending/lint/rebuild-assets/sop/waive/
+│  │                       migrate/report/drop/evidence/evidence-move/verify/recon/js/serve/bootstrap
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
-│  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；七视图全交互联动）
+│  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；六视图全交互联动）
 │  │                       web/ 三文件：index.html + style.css + app.js（server.py 白名单静态路由）
 │  ├─ sop/default.json     SOP 提示清单（扁平 hints：when 触发语义 + check 提示术语，AI 查漏补缺用，无阶段）
 │  ├─ test_sop.py          核心逻辑单测（stdlib unittest）
 │  ├─ test_assets.py       资产实体层单测（key 规范化/归并/聚合语义）
+│  ├─ test_exec.py         exec 执行落库单通道单测
+│  ├─ test_audit.py        报文强制/豁免/lint 门禁对账单测
 │  ├─ kb/                  经验层单元（pentest-kb，Supabase 云端，强制脱敏）
 │  │  ├─ kb.py             经验库逻辑（CLI kb-* 子命令的实现）
 │  │  ├─ schema.sql        经验库建表 DDL（自建 Supabase 时执行）
@@ -70,7 +72,7 @@ PentSuite/
 | 采集 | `recon --project P --domain D [--single][--proxy]`；`js --project P` |
 | 经验库 | `kb search --keyword K`；`kb add --title T --from-file F`（一律 draft）；`kb find-similar`；`kb pending`；`kb approve --id N --confirm`（人的决定）；`kb get/list/deleted/...` |
 
-## 面板七视图（全交互联动）
+## 面板六视图（全交互联动）
 
 目标总览（卡片点击跳转筛选）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+复制为 curl）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜报告·收尾（assets/pentest 模板+lint 门禁+整库备份）。SOP 提示已退役为 AI-only（CLI `sop`），面板不再展示
 
@@ -105,7 +107,7 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 python pentdb/pentdb.py init --project demo
 python pentdb/pentdb.py panel --project demo      # 浏览器打开输出的 URL
 python pentdb/pentdb.py kb search --keyword 测试   # 未配凭据时返回友好提示
-cd pentdb && python -m unittest test_sop test_assets   # 24 用例回归
+cd pentdb && python -m unittest test_sop test_assets test_exec test_audit   # 38 用例回归
 ```
 
 - 数据存放：事实库 `pentdb/data/pentdb.db` 为本地文件，clone 后不存在、init 按需生成；凭据模板 `pentdb/kb/creds.json` 随仓库自带（空值），填入真实值后仅存本机、套件不会自动上传任何内容
