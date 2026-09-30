@@ -82,7 +82,7 @@ def journal_unmatched(c):
         if not fn.endswith(".log"):
             continue
         try:
-            with open(os.path.join(JOURNAL_DIR, fn), encoding="utf-8") as f:
+            with open(os.path.join(JOURNAL_DIR, fn), encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
