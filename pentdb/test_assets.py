@@ -62,6 +62,32 @@ class KeyNorm(unittest.TestCase):
         self.assertEqual(pentdb._split_hostport("host:bad"), ("host:bad", ""))
 
 
+class DropCascade(unittest.TestCase):
+    """drop 必须级联清 assets/reviews——曾因编辑丢失回退成不清 assets（实测踩过）。"""
+
+    def test_drop_removes_assets_and_reviews(self):
+        proj = "drop-cascade-ut"
+        pentdb.cmd_init(argparse.Namespace(project=proj))
+        add(project=proj, kind="domain", value="d.example.com",
+            source="ut", auto=True, status="confirmed", confidence="high")
+        n = len([r for r in pentdb.connect().execute(
+            "SELECT 1 FROM assets WHERE project=?", (proj,))])
+        self.assertGreater(n, 0, "前置失败：add 后应有实体行")
+        pentdb.cmd_drop(argparse.Namespace(project=proj, confirm=True))
+        c = pentdb.connect()
+        try:
+            self.assertEqual(c.execute("SELECT count(*) FROM assets WHERE project=?",
+                                       (proj,)).fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT count(*) FROM raw_events WHERE project=?",
+                                       (proj,)).fetchone()[0], 0)
+            self.assertEqual(c.execute(
+                "SELECT count(*) FROM reviews WHERE event_id NOT IN "
+                "(SELECT id FROM raw_events)", ).fetchone()[0], 0)
+        finally:
+            c.close()
+
+
+
 class RebuildMerge(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

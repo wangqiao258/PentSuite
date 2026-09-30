@@ -1497,14 +1497,20 @@ def cmd_lifecycle(a):
 
 
 def cmd_drop(a):
-    """删除整个项目及其数据（高危操作，必须 --confirm）。changelog 留墓碑记录。"""
+    """删除整个项目及其数据（高危操作，必须 --confirm）。changelog 留墓碑记录。
+    级联清 assets/reviews——reviews 无 project 列，按被删事件的 id 集合清；
+    changelog 故意保留（墓碑留痕）。"""
     if not a.confirm:
         sys.exit("[x] 删除项目是高危操作，必须显式加 --confirm")
     c = connect()
     require_project(c, a.project)
     n = c.execute("SELECT COUNT(*) FROM raw_events WHERE project=?", (a.project,)).fetchone()[0]
-    for t in ("raw_events", "pending_tests", "waives", "evidence"):
+    ev_ids = [r[0] for r in c.execute("SELECT id FROM raw_events WHERE project=?", (a.project,))]
+    for t in ("raw_events", "assets", "pending_tests", "waives", "evidence"):
         c.execute(f"DELETE FROM {t} WHERE project=?", (a.project,))
+    if ev_ids:
+        c.execute("DELETE FROM reviews WHERE event_id IN (%s)" %
+                  ",".join("?" * len(ev_ids)), ev_ids)
     c.execute("DELETE FROM projects WHERE name=?", (a.project,))
     log_change(c, "__system__", "drop", f"项目 {a.project} 已删除（含 {n} 条事件）")
     c.commit()
