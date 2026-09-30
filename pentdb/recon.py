@@ -199,7 +199,8 @@ def run_js(args):
                 f.write(body)
             if dom_row:
                 ns_ev = argparse.Namespace(project=args.project, event_id=dom_row["id"],
-                                           path=ev_path, note=f"JS 原文：{u}")
+                                           path=ev_path, text=None, keep_in_place=False,
+                                           note=f"JS 原文：{u}")
                 try:
                     pdb.cmd_evidence(ns_ev)
                     n_ev += 1
@@ -214,7 +215,8 @@ def run_js(args):
                     title="", detail="", note=f"来自 JS 提取（未探测，code 空）",
                     source=f"JS 解析 {u}", parent_ext=str(dom_row["id"]) if dom_row else "",
                     merge_key="", status="confirmed", confidence="medium", severity="",
-                    code="", tech="", service="", scope="in", auto=True, origin="agent", stage="")
+                    code="", tech="", service="", scope="in", auto=True, origin="agent", stage="",
+                    update=False, req=None, resp=None, waive_capture=None)
                 try:
                     pdb.cmd_add(ns)
                     n_ep += 1

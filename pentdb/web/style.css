@@ -107,3 +107,25 @@
   #review-table .rv-inner{padding:6px 4px}
   #review-table .rv-detail pre{margin:4px 0 8px;max-height:300px;overflow:auto}
   .mini{font-size:11px;padding:0 8px;margin-left:6px}
+  /* 资产页：左树右表 */
+  .assets-grid{display:grid;grid-template-columns:272px minmax(0,1fr);gap:12px;align-items:start}
+  .asset-tree-panel h3{margin-top:0}
+  .asset-tree{max-height:calc(100vh - 240px);overflow:auto;font-size:13px}
+  .tnode{display:flex;align-items:center;gap:5px;padding:2px 6px;border-radius:6px;cursor:pointer;white-space:nowrap}
+  .tnode:hover{background:var(--gray-bg)}
+  .tnode.on{background:var(--blue-bg)}
+  .tnode.on .tlabel{color:var(--blue);font-weight:500}
+  .tcaret{width:14px;flex:none;text-align:center;color:var(--tx2);font-size:10px;cursor:pointer;user-select:none}
+  .tcaret.tleaf{opacity:.35;cursor:default}
+  .tdot{width:8px;height:8px;border-radius:2px;flex:none}
+  .tdot.d-domain{background:var(--purple)} .tdot.d-host{background:var(--blue)}
+  .tdot.d-service{background:var(--teal)} .tdot.d-endpoint{background:var(--amber)}
+  .tdot.d-group{background:var(--tx2)}
+  .tnode.tstale .tlabel,.tnode.tstale .tdot,.tnode.tstale .tcount{opacity:.4}
+  .tcopy{flex:none;margin-left:auto;cursor:pointer;opacity:0;font-size:11px;color:var(--tx2);user-select:none}
+  .tnode:hover .tcopy{opacity:.7}
+  .tcopy:hover{opacity:1;color:var(--blue)}
+  .tlabel{overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .tcount{flex:none;font-size:11px;color:var(--tx2);background:var(--gray-bg);border-radius:8px;padding:0 6px}
+  .tree-sel{display:flex;align-items:center;gap:8px;background:var(--blue-bg);border:1px solid var(--blue);color:var(--blue);border-radius:8px;padding:3px 10px;margin-bottom:10px;font-size:13px}
+  .tree-sel.hidden{display:none}

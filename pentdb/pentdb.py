@@ -60,9 +60,17 @@ def journal_unmatched(c):
                     if not line:
                         continue
                     try:
-                        cmd = (json.loads(line).get("cmd") or "").strip()
+                        rec = json.loads(line)
                     except ValueError:
                         continue
+                    # 会话隔离：journal 按日期全局共享，其他 WorkBuddy 会话/工作目录的
+                    # 探测命令不应归因本项目（实测踩过：并行会话 urlscan 查询被误报）
+                    raw_cwd = rec.get("cwd") or ""
+                    cwd = os.path.normcase(os.path.normpath(raw_cwd)) if raw_cwd else ""
+                    cur = os.path.normcase(os.path.normpath(os.getcwd()))
+                    if cwd and cur and cwd != cur and cur not in cwd and cwd not in cur:
+                        continue
+                    cmd = (rec.get("cmd") or "").strip()
                     if cmd:
                         recs.append(cmd)
         except OSError:
@@ -593,6 +601,13 @@ def rebuild_assets(c, project):
                 akey = ((host + p) if host else ("?" + p)) if p else ("?" + val)
                 e = put("endpoint", akey, akey, "host", host, r)
                 mul(e, "params", val); mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
+
+    # parent_atype 语义修正：parent 解析值若实为库内域名（且无同名 host 实体），记真实类型 domain
+    dom_keys = {k for (at, k) in ent if at == "domain"}
+    host_keys = {k for (at, k) in ent if at == "host"}
+    for (at, k), e in ent.items():
+        if at in ("endpoint", "service") and e["parent_akey"] in dom_keys and e["parent_akey"] not in host_keys:
+            e["parent_atype"] = "domain"
 
     c.execute("DELETE FROM assets WHERE project=?", (project,))
     for (atype, akey), e in ent.items():

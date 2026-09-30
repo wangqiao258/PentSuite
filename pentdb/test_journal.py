@@ -94,6 +94,13 @@ class TestJournalUnmatched(unittest.TestCase):
         self._write(cmd, cmd, cmd)
         self.assertEqual(pentdb.journal_unmatched(self.con)[cmd], 3)
 
+    def test_other_session_cwd_filtered(self):
+        # 并行会话/其他工作目录的探测命令不归因本项目（cwd 会话隔离，实测踩过）
+        with open(os.path.join(self.tmp, "2026-09-30.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": "t", "cmd": "curl http://other-session.com/api",
+                                "cwd": "c:/other/workspace-x"}) + "\n")
+        self.assertEqual(pentdb.journal_unmatched(self.con), {})
+
 
 if __name__ == "__main__":
     unittest.main()

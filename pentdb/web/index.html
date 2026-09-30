@@ -63,15 +63,29 @@
       </div>
       <div class="muted" id="m-msg"></div>
     </div>
-    <div class="filters">
-      <select id="f-atype"><option value="">全部类型</option><option>domain</option><option>host</option><option>service</option><option>endpoint</option></select>
-      <select id="f-status"><option value="">全部状态</option><option value="confirmed">已确认</option><option value="pending">有待审</option><option value="rejected">已驳回</option></select>
-      <input id="f-q" placeholder="搜索实体 key / 属性…" style="flex:1;min-width:180px">
-      <span id="asset-hint" class="muted"></span>
-      <button onclick="loadAssets()">查询</button>
+    <div class="assets-grid">
+      <div class="panel asset-tree-panel">
+        <h3>资产树<span class="muted" style="margin-left:6px">点节点锚定子树，再点取消；⧉ 复制完整地址</span></h3>
+        <div class="filters" style="margin-bottom:4px">
+          <input id="tree-q" placeholder="搜索路径 / 主机…" style="flex:1;min-width:120px" oninput="treeFilter()">
+          <label class="muted"><input type="checkbox" id="tree-hidestale" onchange="treeFilter()">隐 30 天未见</label>
+        </div>
+        <div id="asset-tree" class="asset-tree"><span class="muted">加载中…</span></div>
+      </div>
+      <div class="asset-main">
+        <div class="filters">
+          <select id="f-atype"><option value="">全部类型</option><option>domain</option><option>host</option><option>service</option><option>endpoint</option></select>
+          <select id="f-status"><option value="">全部状态</option><option value="confirmed">已确认</option><option value="pending">有待审</option><option value="rejected">已驳回</option></select>
+          <input id="f-q" placeholder="搜索实体 key / 属性…" style="flex:1;min-width:180px">
+          <span id="asset-hint" class="muted"></span>
+          <button onclick="loadAssets()">查询</button>
+        </div>
+        <div id="tree-sel-bar" class="tree-sel hidden"><span id="tree-sel-txt"></span>
+          <button class="mini" onclick="clearTreeSel()">✕ 清除</button></div>
+        <div class="panel" style="overflow-x:auto"><table id="asset-table"></table></div>
+        <div class="panel"><h3>实体观测下钻（点击资产行展开该实体的全部原始观测；观测即 raw_events，人审在「待审队列」做）</h3><div id="asset-detail" class="muted">← 点击资产行下钻原始观测</div></div>
+      </div>
     </div>
-    <div class="panel" style="overflow-x:auto"><table id="asset-table"></table></div>
-    <div class="panel"><h3>实体观测下钻（点击资产行展开该实体的全部原始观测；观测即 raw_events，人审在「待审队列」做）</h3><div id="asset-detail" class="muted">← 点击资产行下钻原始观测</div></div>
   </section>
   <section id="v-timeline" class="hidden">
     <div class="panel" style="overflow-x:auto"><h3>最近事件（倒序，最多 100 条）</h3><table id="tl-events"></table></div>
@@ -88,6 +102,13 @@
     <div class="panel"><h3>AI 推断与待确认项 —— 队列只做判定：按来源分组、组头可整组判定（批注必填留痕）；点行展开判据卡（备注全文 + 同值历史），报文/证据在详情页唯一渲染、判据卡内一键跳转；同值已有已确认的重复嫌疑自动置底折叠，建议驳回或合并</h3><table id="review-table"></table></div>
   </section>
   <section id="v-report" class="hidden">
+    <div class="panel">
+      <h3>Lint 收尾门禁
+        <button class="mini" onclick="loadLint(this)">重新检查</button>
+        <span id="lint-at" class="muted" style="margin-left:8px;font-weight:400"></span></h3>
+      <div id="lint-sum" style="margin-bottom:4px"></div>
+      <div id="lint-out"></div>
+    </div>
     <div class="panel">
       <h3>Markdown 报告
         <select id="r-tpl" onchange="loadReport()">
