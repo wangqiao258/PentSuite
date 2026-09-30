@@ -79,8 +79,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/api/projects":
                 self._json({"projects": [
-                    {"name": r["name"], "profile": r["profile"] or "attack-surface"}
-                    for r in c.execute("SELECT name, profile FROM projects ORDER BY name")]})
+                    {"name": r["name"], "profile": r["profile"] or "attack-surface",
+                     "archived": bool(r["archived"])}
+                    for r in c.execute("SELECT name, profile, archived FROM projects "
+                                       "ORDER BY archived, name")]})
             elif u.path == "/api/overview":
                 p = q.get("project", [""])[0]
                 if not c.execute("SELECT 1 FROM projects WHERE name=?", (p,)).fetchone():

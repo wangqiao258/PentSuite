@@ -35,6 +35,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
   name       TEXT PRIMARY KEY,
   stages_enabled TEXT DEFAULT '',
+  archived   INTEGER DEFAULT 0,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS raw_events (
@@ -148,6 +149,12 @@ def connect():
             pass
     try:
         c.execute("ALTER TABLE projects ADD COLUMN stages_enabled TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        # projects.archived：归档标记（0=活跃，1=已归档）；面板下拉默认隐藏，数据保留可查
+        c.execute("ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0")
+        c.commit()
     except sqlite3.OperationalError:
         pass
     try:

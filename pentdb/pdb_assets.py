@@ -32,6 +32,29 @@ def cmd_init(a):
     print(f"[ok] 项目已建立: {a.project}  db={DB_PATH}")
 
 
+def _set_archived(project, flag):
+    """归档/取消归档的公共核心：只翻标记，不动任何数据。真删除仍走 drop（--confirm）。"""
+    c = connect()
+    require_project(c, project)
+    c.execute("UPDATE projects SET archived=? WHERE name=?", (flag, project))
+    action = "archive" if flag else "unarchive"
+    word = "已归档" if flag else "已取消归档"
+    log_change(c, project, action, f"项目 {project} {word}")
+    c.commit()
+    tip = "面板下拉默认隐藏，「含归档」开关可见；数据保留可查" if flag else "面板下拉恢复显示"
+    print(f"[ok] 项目 {project} {word}（{tip}）")
+
+
+def cmd_archive(a):
+    """项目归档：面板项目下拉默认隐藏，数据/证据全部保留可查；真删除仍走 drop。"""
+    _set_archived(a.project, 1)
+
+
+def cmd_unarchive(a):
+    """取消归档：恢复面板下拉默认显示。"""
+    _set_archived(a.project, 0)
+
+
 def cmd_add(a):
     if getattr(a, "detail_file", ""):
         with open(a.detail_file, encoding="utf-8") as f:

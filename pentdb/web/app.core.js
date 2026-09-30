@@ -7,7 +7,15 @@ async function api(path,params){const r=await fetch("/api/"+path+(params?"?"+qs(
 
 async function boot(){
   const d=await api("projects");
-  const sel=$("#proj"); sel.innerHTML=d.projects.map(p=>`<option>${p.name}</option>`).join("");
+  const sel=$("#proj"), showArch=$("#show-arch");
+  const visible=()=>d.projects.filter(p=>showArch.checked||!p.archived);
+  const fillProj=()=>{
+    const list=visible();
+    sel.innerHTML=list.map(p=>`<option value="${p.name}">${p.name}${p.archived?"（已归档）":""}</option>`).join("");
+    if(PROJECT&&list.some(p=>p.name===PROJECT))sel.value=PROJECT;
+  };
+  fillProj();
+  showArch.onchange=()=>{fillProj();if(PROJECT&&!visible().some(p=>p.name===PROJECT)){PROJECT=sel.value;location.search="?project="+encodeURIComponent(PROJECT)}};
   const urlProj=new URLSearchParams(location.search).get("project")||"";
   PROJECT=urlProj||sel.value;
   if(PROJECT)sel.value=PROJECT;

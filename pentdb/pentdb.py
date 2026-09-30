@@ -42,9 +42,9 @@ from pdb_core import (ASSET_KINDS, BASE, DB_PATH, FACT_KINDS, SCHEMA, SOP_CFG,
                       VALID_SCOPE, VALID_STATUS, attach_evidence, connect,
                       log_change, now, require_project)
 from pdb_assets import (_norm_domain, _resolve_host, _split_hostport,
-                        asset_is_stale, asset_review_state, cmd_add, cmd_init,
-                        cmd_pending, cmd_query, cmd_rebuild_assets, cmd_review,
-                        rebuild_assets)
+                        asset_is_stale, asset_review_state, cmd_add, cmd_archive,
+                        cmd_init, cmd_pending, cmd_query, cmd_rebuild_assets,
+                        cmd_review, cmd_unarchive, rebuild_assets)
 from pdb_findings import (CONCLUSION_LIFECYCLE, LIFE_CODES, TEST_CONCLUSIONS,
                           cmd_drop, cmd_evidence, cmd_evidence_move, cmd_exec,
                           cmd_lifecycle, cmd_migrate, cmd_verify, cmd_waive,
@@ -288,6 +288,14 @@ def main():
     sp = sub.add_parser("init")
     sp.add_argument("--project", required=True)
     sp.set_defaults(fn=cmd_init)
+
+    sp = sub.add_parser("archive", help="项目归档：面板下拉默认隐藏，数据保留可查（真删除仍走 drop --confirm）")
+    sp.add_argument("--project", required=True)
+    sp.set_defaults(fn=cmd_archive)
+
+    sp = sub.add_parser("unarchive", help="取消归档：恢复面板下拉显示")
+    sp.add_argument("--project", required=True)
+    sp.set_defaults(fn=cmd_unarchive)
 
     sp = sub.add_parser("panel")
     sp.add_argument("--project", default="", help="可选：拼出带 project 的直达 URL 并输出待审数（播报用）")

@@ -60,6 +60,7 @@ PentSuite/
 | 动作 | 命令 |
 |------|------|
 | 建档 | `init --project P` |
+| 归档 | `archive --project P` / `unarchive --project P`（面板下拉默认隐藏已归档项目，「含归档」开关可见；数据/证据全部保留可查；**真删除仍走 drop --confirm，仅限人显式指令**） |
 | 开面板（幂等托管） | `panel --project P`（活着复用/没起拉起/被占报 PID；输出 url+pending 数） |
 | 落资产 | `add --project P --kind domain\|port\|path\|param\|finding\|osint --value V --source "命令/URL" [--code][--tech][--service][--scope][--severity]` |
 | 重扫更新 | 同 kind+value 重复时 `add --update`：刷新观测字段并更新 last_seen（updated_at），状态与人审结论保留 |

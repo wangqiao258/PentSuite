@@ -207,5 +207,55 @@ class AggregateSemantics(unittest.TestCase):
         self.assertTrue(es[("domain", "rs.example.com")]["last_seen"].startswith("20"))
 
 
+class ArchiveRoundtrip(unittest.TestCase):
+    """归档/取消归档：只翻 projects.archived 标记，数据与证据零改动；connect 迁移自动建列。"""
+
+    def test_archive_unarchive_roundtrip(self):
+        proj = "archive-ut"
+        pentdb.cmd_init(argparse.Namespace(project=proj))
+        add(kind="domain", value="arch.example.com", project=proj,
+            origin="human", status="confirmed")
+        before = pentdb.connect().execute(
+            "SELECT COUNT(*) FROM raw_events WHERE project=?", (proj,)).fetchone()[0]
+        self.assertGreater(before, 0)
+
+        pentdb.cmd_archive(argparse.Namespace(project=proj))
+        c = pentdb.connect()
+        self.assertEqual(c.execute(
+            "SELECT archived FROM projects WHERE name=?", (proj,)).fetchone()[0], 1)
+        # 数据零改动
+        after = c.execute(
+            "SELECT COUNT(*) FROM raw_events WHERE project=?", (proj,)).fetchone()[0]
+        self.assertEqual(after, before)
+        n_assets = c.execute(
+            "SELECT COUNT(*) FROM assets WHERE project=?", (proj,)).fetchone()[0]
+        self.assertGreater(n_assets, 0)
+        c.close()
+
+        pentdb.cmd_unarchive(argparse.Namespace(project=proj))
+        self.assertEqual(pentdb.connect().execute(
+            "SELECT archived FROM projects WHERE name=?", (proj,)).fetchone()[0], 0)
+
+    def test_archive_changelog_tombstone(self):
+        proj = "archive-ut2"
+        pentdb.cmd_init(argparse.Namespace(project=proj))
+        pentdb.cmd_archive(argparse.Namespace(project=proj))
+        row = pentdb.connect().execute(
+            "SELECT action, detail FROM changelog WHERE project=? AND action='archive' "
+            "ORDER BY id DESC LIMIT 1", (proj,)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIn(proj, row["detail"])
+
+    def test_archived_not_in_active_api_query(self):
+        """面板 /api/projects 的排序口径：archived 靠后（未归档在前）。"""
+        proj = "archive-ut3"
+        pentdb.cmd_init(argparse.Namespace(project=proj))
+        pentdb.cmd_archive(argparse.Namespace(project=proj))
+        rows = list(pentdb.connect().execute(
+            "SELECT name, archived FROM projects ORDER BY archived, name"))
+        archived_flags = [r["archived"] for r in rows]
+        self.assertEqual(archived_flags, sorted(archived_flags))
+
+
 if __name__ == "__main__":
     unittest.main()
