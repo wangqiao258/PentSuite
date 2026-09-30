@@ -14,12 +14,14 @@ async function boot(){
     sel.innerHTML=list.map(p=>`<option value="${p.name}">${p.name}${p.archived?"（已归档）":""}</option>`).join("");
     if(PROJECT&&list.some(p=>p.name===PROJECT))sel.value=PROJECT;
   };
-  fillProj();
-  showArch.onchange=()=>{fillProj();if(PROJECT&&!visible().some(p=>p.name===PROJECT)){PROJECT=sel.value;location.search="?project="+encodeURIComponent(PROJECT)}};
+  // 深链/当前项目已归档：自动勾上「含归档」，保证下拉能选中它（否则下拉显示与页面内容错位）
   const urlProj=new URLSearchParams(location.search).get("project")||"";
+  if(urlProj&&d.projects.some(p=>p.name===urlProj&&p.archived))showArch.checked=true;
+  fillProj();
   PROJECT=urlProj||sel.value;
   if(PROJECT)sel.value=PROJECT;
   sel.onchange=()=>{PROJECT=sel.value;location.search="?project="+encodeURIComponent(PROJECT)};
+  showArch.onchange=()=>{fillProj();if(PROJECT&&!visible().some(p=>p.name===PROJECT)){PROJECT=sel.value;location.search="?project="+encodeURIComponent(PROJECT)}};
   $("#m-kind").innerHTML=Kinds.filter(k=>k!=="test").map(k=>`<option>${k}</option>`).join("");
   $("#m-kind").onchange=()=>$("#m-sev").classList.toggle("hidden",$("#m-kind").value!=="finding");
   loadAll();
