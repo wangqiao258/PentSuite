@@ -16,8 +16,13 @@ AI 落库与聚合、人看面板与审核的渗透测试**单一项目**。三�
 ```
 PentSuite/
 ├─ pentdb/                 套件运行时（内部全部 __file__ 相对寻址，可整体搬移）
-│  ├─ pentdb.py            CLI：init/panel/add/exec/lifecycle/query/review/pending/lint/hook-install/rebuild-assets/
-│  │                       sop/waive/migrate/report/drop/evidence/evidence-move/verify/recon/js/serve/bootstrap
+│  ├─ pentdb.py            CLI 入口 + main() 子命令注册 + journal 对账/lint 门禁（JOURNAL_DIR 留守保测试补丁语义）
+│  │                       并以 façade 形式 re-export 全部符号——server.py 与 5 个测试文件 `import pentdb` 零感知
+│  ├─ pdb_core.py          共享内核：BASE/DB_PATH/SCHEMA/常量、now/connect/log_change/require_project/attach_evidence
+│  ├─ pdb_assets.py        资产域：init/add/域名归并/rebuild-assets/query/pending/review
+│  ├─ pdb_findings.py      漏洞域：waive/evidence/verify/exec/lifecycle/drop/migrate
+│  ├─ pdb_report.py        报告/SOP 域：pentest 报告装配、sop 提示
+│  ├─ pdb_tooling.py       工具域：panel/hook-install/recon/js/kb/bootstrap
 │  ├─ recon.py             采集器：被动子域枚举 + 存活探测（--single / --proxy 可移植）
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；六视图全交互联动）
 │  │                       web/ 三文件：index.html + style.css + app.js（server.py 白名单静态路由）
@@ -114,7 +119,7 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 python pentdb/pentdb.py init --project demo
 python pentdb/pentdb.py panel --project demo      # 浏览器打开输出的 URL
 python pentdb/pentdb.py kb search --keyword 测试   # 未配凭据时返回友好提示
-cd pentdb && python -m unittest test_sop test_assets test_exec test_audit test_journal   # 51 用例回归
+cd pentdb && python -m unittest test_sop test_assets test_exec test_audit test_journal   # 52 用例回归
 ```
 
 - 数据存放：事实库 `pentdb/data/pentdb.db` 为本地文件，clone 后不存在、init 按需生成；凭据模板 `pentdb/kb/creds.json` 随仓库自带（空值），填入真实值后仅存本机、套件不会自动上传任何内容
