@@ -5,21 +5,24 @@
   - cmd_waive：豁免起草/人工确认
   - cmd_evidence / cmd_evidence_move：证据挂库与改挂（落库核心 attach_evidence 在 pdb_core）
   - cmd_verify / cmd_exec：复测打点与执行落库单通道
+  - parse_exec_packet / exec_packets_for_asset：exec .log 报文解析与资产下钻投影（只读）
   - cmd_migrate / cmd_drop：历史迁移与项目删除
   - set_lifecycle / cmd_lifecycle + LIFE_CODES：漏洞生命周期
 
 向下依赖 pdb_core 与 pdb_assets（cmd_exec 复用 cmd_add 写入口，依赖方向无环）。
 """
 import argparse
+import base64
 import datetime
 import json
 import os
 import re
 import sys
+import urllib.parse
 
-from pdb_assets import cmd_add
-from pdb_core import (DB_PATH, VALID_STATUS, attach_evidence, connect,
-                      log_change, now, require_project)
+from pdb_assets import cmd_add, tests_for_asset
+from pdb_core import (AUDIT_TRIGGERS, DB_PATH, SCHEMA, VALID_STATUS,
+                      attach_evidence, connect, log_change, now, require_project)
 
 # ---------------- 漏洞生命周期（CLI/面板共用；存 finding 行 attrs JSON，与 status 人审态分离） ----------------
 
@@ -182,6 +185,17 @@ def cmd_exec(a):
     ev_id = attach_evidence(c, a.project, eid, path=out_path, note="output " + slug)
     c.commit()
     print(f"[exec] #{eid} exit={code} ｜ 输出已挂证据 #{ev_id} ｜ {out_path}")
+    if getattr(a, "probe_parse", False):
+        # --probe-parse：从输出解析逐路径探测结果批量入库 kind=probe（Burp 式全录，不参与资产归并）。
+        # 解析不出/缺 host 的行跳过并计数，绝不阻断 exec 主流程。
+        from pdb_assets import probe_ingest, probe_parse_text  # 函数级导入：保持 pdb_assets→pdb_findings 单向依赖
+        rows = probe_parse_text(text, a.probe_host or "")
+        if rows:
+            ins, skip = probe_ingest(c, a.project, rows, "exec#%s" % eid, a.parent_ext)
+            c.commit()
+            print(f"[probe] 观测入库 {ins} 条，跳过重复 {skip} 条")
+        else:
+            print("[probe] 输出中未解析出探测行（非目录扫描输出？或缺 --probe-host），跳过")
     shown = text[:6000]
     if len(text) > 6000:
         shown += "\n…（截断，完整输出见上面证据文件）"
@@ -189,6 +203,327 @@ def cmd_exec(a):
         sys.stdout.write(shown + "\n")
     except UnicodeEncodeError:
         sys.stdout.write(shown.encode("gbk", "ignore").decode("gbk", "ignore") + "\n")
+
+
+# ---------------- exec .log 报文解析器（只读投影，不落库） ----------------
+# 把 exec 单通道落盘的 .log（首行 "$ <命令串>" / "exit=<码>" / 空行 / stdout+stderr）
+# 还原为 request/response 报文投影：curl 命令串重建请求报文，输出原文作响应报文。
+# 解析不出（非 exec 日志/非 curl 命令）返回 None；任何意外一律降级不抛异常——
+# 调用方（/api/evidence/packet → 面板）拿到 None 走原文文件卡降级展示。
+
+# curl 选项表：取值长选项（值被消费后忽略——连接/输出类参数不进报文）
+_CURL_VALUE_LONG = frozenset((
+    "--request", "--header", "--data", "--data-raw", "--data-binary",
+    "--data-urlencode", "--url", "--user", "--user-agent", "--cookie",
+    "--cookie-jar", "--referer", "--form", "--form-string", "--max-time",
+    "--connect-timeout", "--retry", "--retry-delay", "--retry-max-time",
+    "--proxy", "--noproxy", "--proxy-user", "--range", "--output",
+    "--write-out", "--dump-header", "--cert", "--key", "--cacert", "--capath",
+    "--resolve", "--connect-to", "--interface", "--upload-file", "--config",
+    "--keepalive-time", "--limit-rate", "--speed-time", "--speed-limit",
+    "--dns-servers"))
+# 短选项里取值的字符（d/H/X/u 有专属语义在解析器内先行处理，不落此表）
+_CURL_VALUE_SHORT = frozenset("ABbCcDEFKmMoPQrTtUuWwxyYzZ")
+# 短选项布尔字符（i/I/v 在解析器内另有动作）
+_CURL_BOOL_SHORT = frozenset("sfgkLnNq")
+# Windows curl 进度噪音行（输出开头；实测 data/exec/ 样本形态）
+_PROG_LINE = (re.compile(r"^\s*% Total\b"),
+              re.compile(r"^\s*Dload\s+Upload\b"),
+              re.compile(r"^\s*\d+\s+\d+\s.*--:--:--"))
+# 未求值变量：$VAR（AI 常见）或 %VAR%（Windows cmd 形态）
+_VAR_RE = re.compile(r"\$|%[A-Za-z_]\w*%")
+
+
+def _join_continuation(cmd):
+    """命令串行续接合并：行尾 ``\\``（sh）或 ``^``（Windows cmd）接下一行。"""
+    out, pend = [], ""
+    for ln in cmd.splitlines():
+        cur = pend + ln.rstrip()
+        pend = ""
+        if cur.endswith("\\") or cur.endswith("^"):
+            pend = cur[:-1].rstrip() + " "
+            continue
+        out.append(cur)
+    if pend:
+        out.append(pend.rstrip())
+    return "\n".join(out)
+
+
+def _tokenize_cmd(cmd):
+    """命令串分词：单/双引号成段剥除，空白（含换行）分隔。
+    返回 (tokens, 引号是否未闭合)；不做反斜杠转义（Windows 路径保真）。"""
+    toks, cur, quote = [], [], ""
+    for ch in cmd:
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                cur.append(ch)
+        elif ch in "\"'":
+            quote = ch
+        elif ch in " \t\r\n":
+            if cur:
+                toks.append("".join(cur))
+                cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        toks.append("".join(cur))
+    return toks, bool(quote)
+
+
+def _clean_output(out):
+    """响应输出净化：\\r 控制字符归一 + 剥离输出开头的 Windows curl 进度噪音行。"""
+    out = out.replace("\r\n", "\n").replace("\r", "\n")
+    ls = out.split("\n")
+    while ls and ((not ls[0].strip()) or any(p.match(ls[0]) for p in _PROG_LINE)):
+        ls.pop(0)
+    return "\n".join(ls)
+
+
+def parse_exec_packet(text):
+    """exec .log 全文 → {request, response, flags} 只读投影（不落库）；解析不出返回 None。
+
+    降级是产品要求：任何意外（非 exec 日志/非 curl 命令/空串/二进制乱码）
+    一律返回 None，绝不抛异常。不确定性记 flags 而不是猜；变量不归一化，
+    $TOKEN 之类原样保留并标 has_variables（证据保真）。"""
+    try:
+        return _parse_exec_packet(text)
+    except Exception:  # noqa: BLE001 —— 解析器不允许把异常漏给调用方
+        return None
+
+
+def _parse_exec_packet(text):
+    if not isinstance(text, str):
+        return None
+    lines = text.split("\n")
+    if not lines or not lines[0].startswith("$ "):
+        return None
+    exit_at = -1
+    for idx in range(1, len(lines)):
+        if lines[idx].startswith("exit="):
+            exit_at = idx
+            break
+    if exit_at < 0:
+        return None  # 无 exit= 行即非 cmd_exec 落盘格式
+    # 命令串 = "$ " 后至 exit= 行前的全部内容（cmd 含换行时首行只有第一段）
+    cmd_body = _join_continuation("\n".join([lines[0][2:]] + lines[1:exit_at]))
+    parsed = _parse_curl_cmd(cmd_body)
+    if parsed is None:
+        return None
+    flags = parsed["flags"]
+    # 响应来源 = exit= 行之后的全部输出（跳过 cmd_exec 固定写入的一行空分隔行）
+    out_lines = lines[exit_at + 1:]
+    if out_lines and out_lines[0] == "":
+        out_lines = out_lines[1:]
+    response = _clean_output("\n".join(out_lines))
+    if not response.strip():
+        response = ""
+        flags["empty"] = True
+    elif not parsed["include"]:
+        flags["response_inferred"] = True  # 无 -i/-I：状态行缺失，输出即响应体原文
+    return {"request": parsed["request"], "response": response, "flags": flags}
+
+
+def _parse_curl_cmd(cmd):
+    """curl 命令串 → {request, include, flags}；非 curl 程序或无 URL 返回 None。"""
+    toks, unclosed = _tokenize_cmd(cmd)
+    if not toks:
+        return None
+    prog = re.split(r"[\\/]", toks[0])[-1].lower()
+    if prog not in ("curl", "curl.exe"):
+        return None
+    method, user = "", ""
+    headers, datas, urls = [], [], []
+    include = head = verbose = unparsed = False
+    i, n = 1, len(toks)
+    while i < n:
+        t = toks[i]
+        i += 1
+        if t.startswith("--"):
+            name, eq, inline = t.partition("=")
+
+            def long_val():
+                nonlocal i
+                if eq:
+                    return inline
+                if i < n:
+                    v = toks[i]
+                    i += 1
+                    return v
+                return ""
+
+            nm = name.lower()
+            if nm == "--request":
+                method = long_val().upper()
+            elif nm == "--header":
+                h = long_val()
+                if ":" in h:
+                    headers.append(h)
+                else:
+                    unparsed = True
+            elif nm in ("--data", "--data-raw", "--data-binary", "--data-urlencode"):
+                datas.append(long_val())
+            elif nm == "--user":
+                user = long_val()
+            elif nm == "--url":
+                urls.append(long_val())
+            elif nm == "--include":
+                include = True
+            elif nm == "--head":
+                head = True
+            elif nm == "--verbose":
+                verbose = True
+            elif nm in _CURL_VALUE_LONG:
+                long_val()  # 连接/输出类参数：值消费掉，不进报文
+            else:
+                unparsed = True  # 未识别选项：记 flag 不猜
+            continue
+        if t.startswith("-") and len(t) > 1:
+            j = 1
+            while j < len(t):
+                ch = t[j]
+                j += 1
+
+                def short_val():
+                    nonlocal j, i
+                    if j < len(t):  # 簇内取值：字符后剩余段（如 -AX "UA"）
+                        v = t[j:]
+                        j = len(t)
+                        return v
+                    if i < n:
+                        v = toks[i]
+                        i += 1
+                        return v
+                    return ""
+
+                if ch == "H":
+                    h = short_val()
+                    if ":" in h:
+                        headers.append(h)
+                    else:
+                        unparsed = True
+                elif ch == "X":
+                    method = short_val().upper()
+                elif ch == "d":
+                    datas.append(short_val())
+                elif ch == "u":
+                    user = short_val()
+                elif ch in _CURL_VALUE_SHORT:
+                    short_val()
+                elif ch in _CURL_BOOL_SHORT:
+                    pass
+                elif ch == "i":
+                    include = True
+                elif ch == "I":
+                    head = True
+                elif ch == "v":
+                    verbose = True
+                else:
+                    unparsed = True
+            continue
+        if t == "-":
+            unparsed = True
+            continue
+        urls.append(t)  # 非选项 token = URL（多个只取第一个，标 truncated）
+    if not urls:
+        return None
+    flags = {"inferred_method": False, "inferred_header": False,
+             "has_variables": False, "truncated": len(urls) > 1,
+             "response_inferred": False, "empty": False}
+    if unparsed:
+        flags["has_unparsed_args"] = True
+    if verbose:
+        flags["verbose"] = True  # stderr 调试行可能混入响应输出
+    if unclosed:
+        flags["unbalanced_quote"] = True
+    if not method:
+        if datas:
+            method, flags["inferred_method"] = "POST", True
+        elif head:
+            method, flags["inferred_method"] = "HEAD", True
+        else:
+            method = "GET"
+    # URL → 请求行目标（含 query）+ Host；无 scheme/host 时不猜，整串作目标并记 flag
+    sp = urllib.parse.urlsplit(urls[0])
+    host, path = sp.netloc, sp.path or "/"
+    if sp.query:
+        path += "?" + sp.query
+    if not host:
+        flags["no_host"] = True
+        path = urls[0]
+    lines = ["%s %s HTTP/1.1" % (method, path)]
+    have = {h.split(":", 1)[0].strip().lower() for h in headers if ":" in h}
+    if host and "host" not in have:
+        lines.append("Host: " + host)
+    lines.extend(headers)
+    if user and "authorization" not in have:
+        if _VAR_RE.search(user):
+            lines.append("Authorization: Basic " + user)  # 变量未求值，base64 无意义，照抄
+        else:
+            lines.append("Authorization: Basic "
+                         + base64.b64encode(user.encode("utf-8")).decode("ascii"))
+    body = "&".join(datas) if len(datas) > 1 else (datas[0] if datas else "")
+    if datas and any(d.startswith("@") for d in datas):
+        flags["data_from_file"] = True  # data 为文件引用：@path 原样保留（不读文件）
+    if datas and "content-type" not in have:
+        lines.append("Content-Type: application/x-www-form-urlencoded")
+        flags["inferred_header"] = True
+    if _VAR_RE.search(cmd):
+        flags["has_variables"] = True
+    return {"request": "\n".join(lines) + "\n\n" + body,
+            "include": bool(include or head), "flags": flags}
+
+
+def exec_packets_for_asset(c, project, atype, akey, limit=10):
+    """资产下钻：归属该资产的 test 事件所挂 exec .log 证据 → 报文只读投影（不落库）。
+
+    供面板 /api/asset-detail 的「探测报文（exec 自动解析）」分区。归属复用
+    tests_for_asset（与 findings 同一套 _finding_hosts 归因，不另写解析）；
+    证据特征对齐 cmd_exec 落库形态：etype='file' 且 note 以 'output' 开头、
+    挂在 test 事件上。limit 限定参与归因的最近 test 事件数（防响应过大——
+    真实库一个资产的 test 流会持续增长）。每条返回
+    {ev_id, event_id, sha256, created_at, request, response, flags}。
+
+    降级原则（对齐 /api/evidence/packet）：读文件失败（证据丢失）或
+    parse_exec_packet 返回 None（python 脚本等非 curl 日志）一律静默跳过，
+    绝不抛异常——面板只收解析成功的报文。evidence.path 在 attach_evidence
+    落库时已是绝对路径（cmd_exec/exec 通道写绝对、evidence/ 目录随库走），
+    直接按行读，不做任何路径重建。
+
+    放在本模块（与 parse_exec_packet 作伴）而非 pdb_assets：本函数依赖链是
+    tests_for_asset(pdb_assets) + parse_exec_packet(本模块)，pdb_findings 顶层
+    已 import pdb_assets（cmd_add），依赖方向 assets→findings 单向无环；
+    放 pdb_assets 则需反向/delayed import，分层更别扭。"""
+    tests = tests_for_asset(c, project, atype, akey)[:limit]  # tests 已按 id 倒序
+    if not tests:
+        return []
+    tids = [t["id"] for t in tests]
+    ph = ",".join("?" * len(tids))
+    ev_rows = c.execute(
+        "SELECT id, event_id, path, sha256, created_at FROM evidence "
+        "WHERE project=? AND etype='file' AND note LIKE 'output%' "
+        f"AND event_id IN ({ph}) ORDER BY id",
+        (project,) + tuple(tids))
+    out = []
+    for ev in ev_rows:
+        try:
+            with open(ev["path"], "rb") as f:
+                raw = f.read(262144)  # 与 /api/evidence/view 同款读上限
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("gbk", "ignore")
+            pkt = parse_exec_packet(text)
+        except OSError:  # 证据文件丢失：静默跳过
+            continue
+        if pkt is None:  # 非 exec curl 日志（python 脚本/空壳）：静默跳过
+            continue
+        out.append({"ev_id": ev["id"], "event_id": ev["event_id"],
+                    "sha256": ev["sha256"] or "", "created_at": ev["created_at"] or "",
+                    "request": pkt["request"], "response": pkt["response"],
+                    "flags": pkt["flags"]})
+    return out
 
 
 def set_lifecycle(c, project, fid, code, note="", tag=""):
@@ -268,12 +603,17 @@ def cmd_drop(a):
     require_project(c, a.project)
     n = c.execute("SELECT COUNT(*) FROM raw_events WHERE project=?", (a.project,)).fetchone()[0]
     ev_ids = [r[0] for r in c.execute("SELECT id FROM raw_events WHERE project=?", (a.project,))]
+    # drop 是人工 --confirm 的高危操作：级联删除会撞 append-only 触发器，
+    # 先短暂解除，删除完成后经 executescript(SCHEMA) 幂等恢复全部审计触发器
+    for t in AUDIT_TRIGGERS:
+        c.execute(f"DROP TRIGGER IF EXISTS {t}")
     for t in ("raw_events", "assets", "pending_tests", "waives", "evidence"):
         c.execute(f"DELETE FROM {t} WHERE project=?", (a.project,))
     if ev_ids:
         c.execute("DELETE FROM reviews WHERE event_id IN (%s)" %
                   ",".join("?" * len(ev_ids)), ev_ids)
     c.execute("DELETE FROM projects WHERE name=?", (a.project,))
+    c.executescript(SCHEMA)  # 幂等恢复全部审计触发器（executescript 自带隐式 COMMIT）
     log_change(c, "__system__", "drop", f"项目 {a.project} 已删除（含 {n} 条事件）")
     c.commit()
     print(f"[ok] 项目 {a.project} 已删除（{n} 条事件），changelog 留痕")

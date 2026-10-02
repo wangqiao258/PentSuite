@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
-UA = "PentDB/1.0 (+recon pipeline)"
+UA = "PentDB/1.0 (+recon pipeline) BugBounty-Harman"
 
 
 def resolve_proxy(args):

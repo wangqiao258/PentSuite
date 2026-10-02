@@ -1,4 +1,5 @@
 // PentDB 面板 · 发现·漏洞视图：列表/筛选/详情复测工作台/证据链（事件委托）
+let DEDUP_MAP={};  // dedup_key -> 该指纹下 finding 条数（列表打「同指纹」标用，loadFindings 刷新）
 function lastRetest(fid){
   const fids=new Set([String(fid)]);
   const rel=TESTS.filter(t=>(t.parent_ext||"").split(",").map(s=>s.trim()).some(s=>fids.has(s)))
@@ -13,6 +14,7 @@ const frow=r=>{
     `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">`+
     `<span class="sev-dot sev-${r.severity||"none"}"></span><b>${esc(r.title||r.value)}</b> ${lifeTag(lifeOf(r))}`+
     (pend?`<span class="tag t-new">待审</span>`:"")+
+    (DEDUP_MAP[r.dedup_key]>1?`<span class="tag" style="background:#FAC775;color:#412402">同指纹 ×${DEDUP_MAP[r.dedup_key]}</span>`:"")+
     `<span style="flex:1"></span><span class="muted">#${r.id}</span></div>`+
     `<div class="muted" style="font-size:12px;margin-top:2px">`+
     (tgt?esc(tgt)+" · ":"")+
@@ -85,7 +87,8 @@ function findingDetail(r){
     (prof||(!secs.length?`<h4>描述 / 复测结论</h4><div style="white-space:pre-wrap">${esc(r.detail||"")}</div>`:""))+
     (r.note?`<h4>结论备注</h4><div style="white-space:pre-wrap">${esc(r.note)}</div>`:"")+
     `<h4>来源</h4><div class="src">${esc(r.source)}</div>`+
-    `<div class="muted" style="margin-top:8px">${(r.created_at||"")} · scope=${esc(r.scope||"unknown")}</div>`;
+    `<div class="muted" style="margin-top:8px">${(r.created_at||"")} · scope=${esc(r.scope||"unknown")}`+
+    (r.dedup_key?` · 指纹 ${esc(r.dedup_key)}`:"")+"</div>";
   const life=lifeOf(r);
   const lifeSel=isFinding?`<select id="life-quick" class="mini" onchange="setLife(${r.id},this.value)" title="快捷改生命周期（写 changelog 留痕）">`+
     (life?"":`<option value="">生命周期?</option>`)+
@@ -122,7 +125,10 @@ function findingDetail(r){
     html+=packet;
   }
   $("#finding-detail").innerHTML=html;
-  if(isFinding){loadEvidencePanel(r,rel);}
+  loadEvidencePanel(r,rel).catch(err=>{  // osint 同样加载（此前只 finding 加载，osint 的报文区永远卡"加载中…"）；任何异常降级为可见文案而非无限占位
+    const pk=$("#fd-packets"); if(pk)pk.className="muted",pk.textContent="事实报文加载失败："+err.message;
+    const ev=$("#ev-panel"); if(ev)ev.textContent="证据链加载失败："+err.message;
+  });
 }
 async function setLife(fid,code){
   if(!code)return;
@@ -132,6 +138,17 @@ async function setLife(fid,code){
   loadFindings();
 }
 const evIsPkt=e=>e.etype==="request"||e.etype==="response"||(e.note&&(e.note.startsWith("request")||e.note.startsWith("response")));
+// exec 类证据：cmd_exec 单通道落盘的 .log（note 以 "output" 开头）——经 /api/evidence/packet 只读解析成报文
+const evIsExecLog=e=>e.etype==="file"&&e.note&&e.note.startsWith("output");
+const EXEC_FLAG_HINTS=[
+  ["response_inferred","（无 -i，状态行缺失，响应体原文）"],
+  ["has_variables","（含未求值变量）"],
+  ["inferred_method","（方法由参数推断）"],
+  ["inferred_header","（Content-Type 为补全默认值）"],
+  ["truncated","（多 URL 只取第一个）"],
+  ["empty","（输出为空）"],
+  ["data_from_file","（data 为文件引用，原文保留）"],
+];
 async function fillPkt(id,ev){
   const pre=document.getElementById(id); if(!pre)return;
   try{
@@ -145,7 +162,18 @@ async function loadEvidencePanel(f,rel){
   const ids=[f.id,...rel.map(t=>t.id)];
   const d=await api("evidence",{project:PROJECT,event_ids:ids.join(",")});
   const evs=(d.evidence||[]).slice().sort((a,b)=>a.id-b.id);
-  const pkts=evs.filter(evIsPkt), files=evs.filter(e=>!evIsPkt(e));
+  const pkts=evs.filter(evIsPkt);
+  // exec .log 证据：先并行调 /api/evidence/packet，解析成功升级为报文组，失败降级回文件卡
+  const execEvs=evs.filter(e=>!evIsPkt(e)&&evIsExecLog(e));
+  const files=evs.filter(e=>!evIsPkt(e)&&!evIsExecLog(e));
+  const execResults=await Promise.all(execEvs.map(e=>
+    fetch("/api/evidence/packet?id="+e.id).then(r=>r.ok?r.json():null).catch(()=>null)));
+  const execGroups=[];
+  execResults.forEach((v,i)=>{
+    if(v&&v.ok&&typeof v.request==="string")execGroups.push({exec:execEvs[i],pkt:v});
+    else files.push(execEvs[i]);
+  });
+  files.sort((a,b)=>a.id-b.id);
   // —— 报文配对：request 开新组，response 归入最近一个缺响应的组（多次 add --update 得多组）——
   const groups=[];
   pkts.forEach(e=>{
@@ -154,9 +182,22 @@ async function loadEvidencePanel(f,rel){
     const last=groups[groups.length-1];
     if(last&&!last.resp)last.resp=e;else groups.push({req:null,resp:e});
   });
+  const allGroups=groups.concat(execGroups);  // exec 解析组插在事实报文组之后
   if(pkBox){
     pkBox.className="";
-    pkBox.innerHTML=groups.length?groups.map((g,i)=>{
+    pkBox.innerHTML=allGroups.length?allGroups.map((g,i)=>{
+      if(g.exec){  // exec 自动解析组：内容已随接口返回，无需再 fillPkt
+        const e=g.exec,fl=g.pkt.flags||{};
+        const hints=EXEC_FLAG_HINTS.filter(([k])=>fl[k]).map(([,s])=>s);
+        return `<div class="pkt-card">`+
+          `<div class="hd"><b>第 ${i+1} 组</b><span class="muted">exec 自动解析 · 挂 #${e.event_id} · sha256 ${(e.sha256||"").slice(0,16)}…</span>`+
+          `<span style="flex:1"></span><button class="mini" data-ev="${e.id}">查看 .log 原文</button></div>`+
+          `<div class="pkt-tabs"><span class="pkt-tab on" data-pkt="req">请求</span><span class="pkt-tab" data-pkt="resp">响应</span></div>`+
+          `<pre data-side="req" id="pkt-req-${i}">${esc(g.pkt.request||"")}</pre>`+
+          `<pre data-side="resp" id="pkt-resp-${i}" class="hidden">${esc(g.pkt.response||"")}</pre>`+
+          (hints.length?`<div class="muted" style="font-size:12px;margin-top:2px">${hints.join(" ")}</div>`:"")+
+          `<pre class="hidden" id="evc-${e.id}"></pre></div>`;
+      }
       const hdr=g.req||g.resp;
       const reqCls=!g.req?"hidden":"", respCls=(g.req||!g.resp)?"hidden":"";
       return `<div class="pkt-card">`+
@@ -167,9 +208,9 @@ async function loadEvidencePanel(f,rel){
         `<pre data-side="resp" id="pkt-resp-${i}" class="${respCls}">${g.resp?"加载中…":"（无响应报文）"}</pre></div>`;
     }).join("")
     :`<span class='muted'>暂无事实报文（add --req/--resp 或 evidence --text --note request 落库后在此成对展示）</span>`;
-    if(!groups.length)pkBox.className="muted";
+    if(!allGroups.length)pkBox.className="muted";
     const loads=[];
-    groups.forEach((g,i)=>{
+    allGroups.forEach((g,i)=>{
       if(g.req)loads.push(fillPkt("pkt-req-"+i,g.req));
       if(g.resp)loads.push(fillPkt("pkt-resp-"+i,g.resp));
     });
@@ -253,6 +294,7 @@ async function loadFindings(){
   ASSET_MAP={}; (ad.events||[]).forEach(a=>{ASSET_MAP[String(a.id)]=a});
   TESTS=td.events||[];
   const all=d.findings||[];
+  DEDUP_MAP={};all.forEach(r=>{if(r.dedup_key)DEDUP_MAP[r.dedup_key]=(DEDUP_MAP[r.dedup_key]||0)+1});
   const q=((($("#f-find-q")||{}).value)||"").trim().toLowerCase();
   const matchQ=r=>!q||[r.title,r.value,r.detail,r.note].some(x=>(x||"").toLowerCase().includes(q));
   const st=r=>!findStatus||r.status===findStatus;

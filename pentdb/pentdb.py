@@ -43,11 +43,14 @@ from pdb_core import (ASSET_KINDS, BASE, DB_PATH, FACT_KINDS, SCHEMA, SOP_CFG,
                       log_change, now, require_project)
 from pdb_assets import (_norm_domain, _resolve_host, _split_hostport,
                         asset_is_stale, asset_review_state, cmd_add, cmd_archive,
-                        cmd_init, cmd_pending, cmd_query, cmd_rebuild_assets,
-                        cmd_review, cmd_unarchive, rebuild_assets)
+                        cmd_init, cmd_pending, cmd_probe_import, cmd_query,
+                        cmd_rebuild_assets, cmd_review, cmd_unarchive,
+                        findings_for_asset, probe_ingest, probe_parse_file,
+                        rebuild_assets, tests_for_asset)
 from pdb_findings import (CONCLUSION_LIFECYCLE, LIFE_CODES, TEST_CONCLUSIONS,
                           cmd_drop, cmd_evidence, cmd_evidence_move, cmd_exec,
                           cmd_lifecycle, cmd_migrate, cmd_verify, cmd_waive,
+                          exec_packets_for_asset, parse_exec_packet,
                           set_lifecycle, sync_lifecycle_from_test)
 from pdb_report import (FINDING_MARKS, STATE_ICON, VERIFY_FRAME, _hints_menu,
                         _parse_finding_detail, _pentest_report, _term_in,
@@ -125,13 +128,13 @@ def lint_report(c, project, journal_check=True):
     errors, warns = [], []
     # test 事件缺 parent_ext 无补录通道（test 是事件流，--update 不适用），
     # 允许用 waive(event_id=该事件, term 含 parent_ext) 留痕豁免；豁免清单收尾提交用户裁决。
-    wrows = c.execute("SELECT id,event_id,term,confirmed FROM waives WHERE project=?",
+    wrows = c.execute("SELECT id,event_id,term,reason,confirmed FROM waives WHERE project=?",
                       (project,)).fetchall()
     # 豁免只有"已确认"（confirmed=1）才生效——AI 可起草豁免但不得自批（对齐 kb approve 的人审门）
     waived_pe = {w["event_id"] for w in wrows
                  if "parent_ext" in (w["term"] or "") and w["confirmed"]}
     waived_capture = {w["event_id"] for w in wrows
-                      if "抓包" in (w["term"] or "") and w["confirmed"]}
+                      if ("抓包" in (w["term"] or "") or "取证" in (w["term"] or "")) and w["confirmed"]}
     draft_waives = [w for w in wrows if not w["confirmed"]]
     ev_req = {r[0] for r in c.execute(
         "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'request%'", (project,))}
@@ -171,9 +174,18 @@ def lint_report(c, project, journal_check=True):
                 and not (r["note"] or "").strip().startswith(TEST_CONCLUSIONS):
             warns.append(f"#{rid} test 结论未以机读词开头（{'/'.join(TEST_CONCLUSIONS)}）"
                          f"——复测时间轴聚合与 lifecycle 同步依赖它")
+        if r["kind"] == "test" and (r["note"] or "").strip() \
+                and (r["note"] or "").strip().startswith(TEST_CONCLUSIONS) \
+                and "依据" not in (r["note"] or ""):
+            warns.append(f"#{rid} test 结论缺判断依据（建议「结论 ｜ 依据：输出关键证据」两段式"
+                         f"——决策链在面板可复核，对齐成熟产品 finding proof 惯例）")
         if (r["kind"] in ("finding", "osint", "suggestion")
                 and not (r["title"] or "").strip()):
             errors.append(f"#{rid} {r['kind']} 缺 title（待审页无标题不可读）")
+        if r["kind"] == "suggestion" and (r["detail"] or "") \
+                and "【下一步】" not in r["detail"]:
+            warns.append(f"#{rid} suggestion 缺【下一步】段（批次收尾计划建议按"
+                         f"【已做】/【结论】/【下一步】三段落库——计划是一等公民，面板与报告可见）")
         if r["kind"] == "finding" and (r["detail"] or "") and "【" not in r["detail"]:
             warns.append(f"#{rid} finding detail 无【节】结构（建议按【描述】/【复测结论】/【修复建议】分节落库）")
         if r["kind"] == "finding" and (r["detail"] or "") and "【请求】" not in r["detail"] \
@@ -187,6 +199,21 @@ def lint_report(c, project, journal_check=True):
                           f"人工 waive --wid N --confirm 确认后生效）")
         if r["kind"] == "finding" and not (r["parent_ext"] or "").strip():
             warns.append(f"#{rid} finding 缺 parent_ext（应归因到被测资产 record id，目标上下文断裂）")
+        # osint 对账：情报参考至少一份事实取证材料（与 finding 报文门禁同一套豁免/确认机制）
+        if r["kind"] == "osint" and rid not in waived_capture and rid not in ev_any:
+            errors.append(f"#{rid} 情报缺取证材料（写入口已强制：add --kind osint --resp <文件|->，"
+                          f"或事后 evidence --text/--path 挂原始响应/输出；材料取不回的走 "
+                          f"--waive-capture 起草豁免，人工确认后生效）")
+    # 对账④：同指纹 finding 多条非 rejected（写入即并入生效前的存量/--no-dedupe 产物）——归并裁决交人工
+    groups = {}
+    for r in c.execute("SELECT id, dedup_key FROM raw_events WHERE project=? AND kind='finding' "
+                       "AND status!='rejected' AND dedup_key!='' ORDER BY id", (project,)):
+        groups.setdefault(r["dedup_key"], []).append(r["id"])
+    for k, ids in sorted(groups.items()):
+        if len(ids) > 1:
+            warns.append("同指纹 finding ×{}（{} ｜ 指纹 {}）——疑似同一漏洞多登记，"
+                         "建议人工归并或驳回；确属不同漏洞可忽略".format(
+                             len(ids), "、#".join(map(str, ids)), k))
     if draft_waives:
         warns.append("待人工确认的豁免 " + "、".join(
             f"wid={w['id']}(#{w['event_id']} {w['term']})" for w in draft_waives)
@@ -198,7 +225,10 @@ def lint_report(c, project, journal_check=True):
             shown = cmd if len(cmd) <= 90 else cmd[:87] + "…"
             errors.append(f"执行流水未落库×{n}: {shown}（journal 有记录但无对应 test 事件"
                           f"——走 exec 单通道补记，或 add --kind test 登记结论）")
-    return {"errors": errors, "warns": warns}
+    # draft_waives 结构化输出（面板 lint 卡片渲染「确认豁免」按钮用；CLI 不受影响）
+    return {"errors": errors, "warns": warns,
+            "draft_waives": [{"id": w["id"], "event_id": w["event_id"], "term": w["term"],
+                              "reason": w["reason"]} for w in draft_waives]}
 
 
 def cmd_lint(a):
@@ -314,11 +344,11 @@ def main():
                     help="从文件读 detail（复测物料包推荐方式，优先于 --detail）")
     sp.add_argument("--note", default="")
     sp.add_argument("--req", default="",
-                    help="finding 专用：真实请求原文（文件路径或 - 接 stdin），自动挂 evidence note=request")
+                    help="finding/osint：真实请求原文（文件路径或 - 接 stdin），自动挂 evidence note=request（osint 至少 req/resp 一项）")
     sp.add_argument("--resp", default="",
-                    help="finding 专用：真实响应原文（文件路径或 - 接 stdin），自动挂 evidence note=response")
+                    help="finding/osint：真实响应原文（文件路径或 - 接 stdin），自动挂 evidence note=response（osint 至少 req/resp 一项）")
     sp.add_argument("--waive-capture", dest="waive_capture", default="",
-                    help="finding 专用：初测报文已丢时的豁免原因（无报文建档，豁免起草待人确认生效）")
+                    help="finding/osint：报文/取证材料确实取不回时的豁免原因（无报文/无取证建档，豁免起草待人确认生效）")
     sp.add_argument("--source", required=True)
     sp.add_argument("--ext-id", dest="ext_id", default="")
     sp.add_argument("--parent-ext", dest="parent_ext", default="")
@@ -329,10 +359,12 @@ def main():
     sp.add_argument("--code", default="", help="HTTP 状态码（扫描器实测值）")
     sp.add_argument("--tech", default="", help="指纹/技术栈（cloudflare/tomcat/istio…）")
     sp.add_argument("--service", default="", help="端口服务（mysql/http/ssh…）")
-    sp.add_argument("--scope", default="unknown", help="范围标记 in/out/unknown")
+    sp.add_argument("--scope", default="", help="范围标记 in/out/unknown（缺省=保留原值；新建缺省 unknown）")
     sp.add_argument("--auto", action="store_true", help="机器可验证事实，允许自动 confirmed")
     sp.add_argument("--update", action="store_true",
                     help="重扫更新：同 kind+value 已存在时刷新观测字段（note/code/tech/service/来源/验证时间），状态与人审结论保留")
+    sp.add_argument("--no-dedupe", dest="no_dedupe", action="store_true",
+                    help="同指纹 finding 强制独立成条（默认写入即并入主条目：有报文转挂 evidence，无报文拒写）")
     sp.add_argument("--origin", default="agent", choices=VALID_ORIGIN)
     sp.set_defaults(fn=cmd_add)
 
@@ -344,12 +376,27 @@ def main():
                     help="完整命令串，原样执行（如 --cmd 'curl -is \"http://x\"'；外层单引号保内层双引号）")
     sp.add_argument("--action", default="", help="动作标签（进 value；缺省用命令本身）")
     sp.add_argument("--title", default="")
-    sp.add_argument("--note", default="", help="结论（AI 判定写这里，复测时间轴展示）")
+    sp.add_argument("--note", default="",
+                    help="结论（AI 判定写这里；建议「结论 ｜ 依据：输出关键证据」两段式，复测时间轴展示）")
     sp.add_argument("--detail", default="")
     sp.add_argument("--severity", default="")
     sp.add_argument("--confidence", default="high", help="AI 写入置信度（缺省 high）")
     sp.add_argument("--timeout", type=int, default=120, help="命令超时秒数（超时仍落盘留痕）")
+    sp.add_argument("--probe-parse", dest="probe_parse", action="store_true",
+                    help="执行后从输出解析逐路径探测结果并批量入库 kind=probe（需 --probe-host 提供缺省 host）")
+    sp.add_argument("--probe-host", dest="probe_host", default="",
+                    help="--probe-parse 的缺省 host（输出行只有相对路径时必填；行内含完整 URL 则可省）")
     sp.set_defaults(fn=cmd_exec)
+
+    sp = sub.add_parser("probe-import", help="扫描结果批量入库为 probe 观测（Burp 式全录：JSON 或 log 文本，不参与资产归并）")
+    sp.add_argument("--project", required=True)
+    sp.add_argument("--file", required=True, help="扫描结果文件（JSON 行列表或 dirscan/gobuster/ffuf 文本）")
+    sp.add_argument("--host", default="", help="缺省 host（结果行只有相对路径时必填；行内含完整 URL/host 字段则可省）")
+    sp.add_argument("--source", default="", help="溯源（缺省用文件路径；建议写 exec#编号+工具名）")
+    sp.add_argument("--parent-ext", dest="parent_ext", default="", help="归属事件 id（多对象逗号分隔，可空）")
+    sp.add_argument("--format", default="auto", choices=("auto", "json", "text"))
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true", help="只解析统计不入库")
+    sp.set_defaults(fn=cmd_probe_import)
 
     sp = sub.add_parser("query")
     sp.add_argument("--project", required=True)

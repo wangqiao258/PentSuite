@@ -555,12 +555,10 @@ def update_experience(
     scenario_tags: list = None,
     tool_code: str = None,
     tool_type: str = None,
-    status: str = None,
 ) -> str:
-    """更新一条经验的字段（只更新传入的字段，未传字段保持不变）。修改前自动做脱敏校验。"""
-    if status is not None and status not in ("approved", "draft", "rejected", "deleted"):
-        return f"[x] status 参数无效: {status}（仅支持 approved / draft / rejected / deleted）"
-
+    """更新一条经验的字段（只更新传入的字段，未传字段保持不变）。修改前自动做脱敏校验。
+    注意：不提供 status 参数——状态翻转（审批/驳回）只能走 approve/reject 通道，
+    approve 的 --confirm 人审门不允许经 update 绕过（2026-10-02 P0 防绕过）。"""
     combined = " ".join(filter(None, [title or "", detail or "", tool_code or ""]))
     hits = check_sensitive(combined)
     if hits:
@@ -585,9 +583,6 @@ def update_experience(
     if tool_type is not None:
         fields.append("tool_type = %s")
         params.append(tool_type)
-    if status is not None:
-        fields.append("status = %s")
-        params.append(status)
     if not fields:
         return "[x] 未提供任何要更新的字段。"
 

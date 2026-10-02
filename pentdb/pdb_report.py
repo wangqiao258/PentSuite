@@ -84,7 +84,15 @@ def _pentest_report(c, project):
             out.append("**证据**:")
             for e in evs:
                 out.append(f"- `{e['path']}`（sha256={e['sha256'][:16]}…）")
-    out += ["", "## 4 附录：资产清单",
+    sug = c.execute(
+        "SELECT id, title, detail, created_at FROM raw_events "
+        "WHERE project=? AND kind='suggestion' ORDER BY id DESC LIMIT 1",
+        (project,)).fetchone()
+    if sug:
+        out += ["", "## 4 复测计划（最新批次收尾）",
+                f"- 记录: suggestion #{sug['id']} ｜ 生成: {(sug['created_at'] or '')[:19]}",
+                "", sug["detail"] or sug["title"] or "（空计划）"]
+    out += ["", "## 5 附录：资产清单",
             "完整资产分组与状态见面板目标总览，或 `pentdb.py report --project " + project + "`（资产模式）。"]
     return "\n".join(out)
 

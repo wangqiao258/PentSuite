@@ -127,7 +127,8 @@ def cmd_hook_install(a):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
         f.write("\n")
     print(f"[ok] 已写入 {cfg_path}（{scope}）")
-    print("    生效步骤：宿主 /hooks 面板审查确认（外部修改的 hooks 必须经人工审查）")
+    print("    生效步骤：CLI 终端版经宿主 /hooks 面板审查后生效（外部修改需人工确认，AI 不得代批）；"
+          "桌面版实测免审动态生效（验证=新会话跑命令查 journal）")
     print("    验证：生效后任意命令执行一次，检查 pentdb/data/journal/<日期>.log 是否追加")
     if getattr(a, "global_", False):
         # 全局部署后清理项目级旧配置，避免双份（同命令宿主会去重，但留着易困惑）

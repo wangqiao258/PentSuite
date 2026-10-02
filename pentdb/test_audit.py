@@ -10,6 +10,11 @@
   4. 结论机读词：note 不以机读词开头 → lint warn；以机读词开头 → 无该 warn
   5. 报文写入口门禁：finding 无 --req/--resp 拒绝；--waive-capture 起草豁免（不生效），
      人工 waive --wid N --confirm 后生效；report 出口门禁 error 拒出、--force 放行
+  6. osint 取证门禁：无 --resp/--req 拒绝；豁免起草→确认闭环；双 term 匹配
+  7. finding 去重指纹：同指纹并入主条目（报文转挂 dedup-merge 留痕）/无报文拒写/
+     --no-dedupe 逃生成条 + lint 同指纹归并 warn；note/osint 不参与
+  6. osint 取证门禁：无 --req/--resp 拒绝；--resp 任一即可入库；--waive-capture 起草
+     （term=无取证待补）不生效、人工确认后 lint 不再报；finding 抓包豁免 term 匹配不受影响
 """
 import argparse
 import os
@@ -33,7 +38,7 @@ def ns(**kw):
                 note="", source="unittest", parent_ext="", merge_key="", status="new",
                 confidence="", severity="", code="", tech="", service="", scope="in",
                 auto=False, update=False, origin="agent", stage="",
-                req="", resp="", waive_capture="")
+                req="", resp="", waive_capture="", no_dedupe=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -290,6 +295,144 @@ class TestCaptureGate(AuditBase):
         pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=wid, confirm=True,
                                             term="", reason=""))
         self.assertFalse(lint()["errors"])
+
+
+class TestOsintEvidence(AuditBase):
+    """osint 情报参考的取证门禁：与 finding 报文门禁同一套豁免/确认机制。"""
+
+    def test_osint_without_material_rejected(self):
+        with self.assertRaises(SystemExit):
+            pentdb.cmd_add(ns(kind="osint", value="sub.example.com", title="裸情报",
+                              source="ut", origin="agent", confidence="medium"))
+
+    def test_osint_with_resp_only_persists_and_lint_clean(self):
+        respf = os.path.join(_TMPDIR, "osint1.resp.txt")
+        with open(respf, "w", encoding="utf-8") as f:
+            f.write("HTTP/1.1 200 OK\r\n\r\n{ \"org\": \"example\" }")
+        pentdb.cmd_add(ns(kind="osint", value="sub.example.com", title="资产测绘情报",
+                          source="ut", origin="agent", confidence="medium", resp=respf))
+        c = pentdb.connect()
+        c.row_factory = sqlite3.Row
+        oid = c.execute("SELECT id FROM raw_events WHERE project=? AND kind='osint' "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()["id"]
+        ev = c.execute("SELECT note FROM evidence WHERE project=? AND event_id=? "
+                       "AND note LIKE 'response%'", (PROJ, oid)).fetchone()
+        c.close()
+        self.assertIsNotNone(ev)  # response 材料已挂 evidence
+        rep = lint()
+        self.assertFalse(any("情报缺取证" in e and f"#{oid}" in e for e in rep["errors"]))
+
+    def test_osint_waive_draft_then_confirm(self):
+        pentdb.cmd_add(ns(kind="osint", value="mail.example.com", title="丢材料情报",
+                          source="ut", origin="agent", confidence="medium",
+                          waive_capture="情报源响应未留档"))
+        c = pentdb.connect()
+        c.row_factory = sqlite3.Row
+        oid = c.execute("SELECT id FROM raw_events WHERE project=? AND kind='osint' "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()["id"]
+        w = c.execute("SELECT id,term,confirmed FROM waives WHERE project=? AND event_id=? "
+                      "ORDER BY id DESC LIMIT 1", (PROJ, oid)).fetchone()
+        c.close()
+        self.assertEqual(w["term"], "无取证待补")  # osint 豁免专用 term
+        self.assertEqual(w["confirmed"], 0)  # 起草态不生效
+        rep = lint()
+        self.assertTrue(any("情报缺取证" in e and f"#{oid}" in e for e in rep["errors"]))
+        # 人工确认（waive --wid N --confirm 的函数级等价调用）后生效
+        pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=w["id"], confirm=True,
+                                            term="", reason=""))
+        rep = lint()
+        self.assertFalse(any("情报缺取证" in e and f"#{oid}" in e for e in rep["errors"]))
+
+    def test_waived_capture_term_matching(self):
+        # "无取证待补"（osint）与 "无抓包待补"（finding）双 term 均应被 waived_capture 命中
+        pentdb.cmd_add(ns(kind="finding", value="http://t/term-match", title="term匹配用例",
+                          source="ut", origin="agent", confidence="high",
+                          waive_capture="抓包豁免term匹配验证"))
+        c = pentdb.connect()
+        c.row_factory = sqlite3.Row
+        fid = c.execute("SELECT id FROM raw_events WHERE project=? AND kind='finding' "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()["id"]
+        wid = c.execute("SELECT id FROM waives WHERE project=? AND event_id=? AND confirmed=0 "
+                        "ORDER BY id DESC LIMIT 1", (PROJ, fid)).fetchone()["id"]
+        c.close()
+        rep = lint()
+        self.assertTrue(any("缺请求/响应证据" in e and f"#{fid}" in e for e in rep["errors"]))
+        pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=wid, confirm=True,
+                                            term="", reason=""))
+        rep = lint()
+        self.assertFalse(any("缺请求/响应证据" in e and f"#{fid}" in e for e in rep["errors"]))
+
+
+class TestDedupe(AuditBase):
+    """finding 去重指纹：写入即并入（报文转挂）/无材料拒写/--no-dedupe 逃生/lint 同指纹 warn"""
+
+    def _last_finding(self):
+        c = pentdb.connect()
+        c.row_factory = sqlite3.Row
+        r = c.execute("SELECT id, value, title, dedup_key FROM raw_events WHERE project=? "
+                      "AND kind='finding' ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()
+        c.close()
+        return r
+
+    def _ev_count(self, fid):
+        c = pentdb.connect()
+        n = c.execute("SELECT COUNT(*) FROM evidence WHERE project=? AND event_id=?",
+                      (PROJ, fid)).fetchone()[0]
+        c.close()
+        return n
+
+    def test_same_fingerprint_merges_with_packets(self):
+        reqf, respf = _pkt_files("dd1")
+        pentdb.cmd_add(ns(kind="finding", value="http://t/Dup", title="SQL 注入 测试",
+                          source="ut", origin="agent", confidence="high", req=reqf, resp=respf))
+        m1 = self._last_finding()
+        self.assertTrue(m1["dedup_key"])  # 指纹已落库
+        n_ev1 = self._ev_count(m1["id"])
+        # 端点顺序不同 + title 大小写/空白差异 + 多了 host 前缀：规范化后同指纹
+        reqf2, respf2 = _pkt_files("dd2")
+        pentdb.cmd_add(ns(kind="finding", value="HTTP://T/Dup/,/dup", title="sql注入测试",
+                          source="ut", origin="agent", confidence="high", req=reqf2, resp=respf2))
+        m2 = self._last_finding()
+        self.assertEqual(m2["id"], m1["id"])  # 未新建条目
+        self.assertEqual(self._ev_count(m1["id"]), n_ev1 + 2)  # 报文转挂主条目
+        c = pentdb.connect()
+        act = c.execute("SELECT action FROM changelog WHERE project=? AND action='dedup-merge' "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()
+        c.close()
+        self.assertTrue(act)  # 留痕存在
+
+    def test_same_fingerprint_without_packets_rejected(self):
+        # 同指纹但无报文：写入口拒收（豁免场景提示作用于主条目）
+        with self.assertRaises(SystemExit):
+            pentdb.cmd_add(ns(kind="finding", value="http://t/dup", title="Sql 注入 测试",
+                              source="ut", origin="agent", confidence="high",
+                              waive_capture="重复登记走豁免"))
+
+    def test_no_dedupe_forces_independent_row(self):
+        # 先立主条目，再 --no-dedupe 强制同指纹独立成条 → lint 出归并 warn
+        reqf, respf = _pkt_files("dd3")
+        pentdb.cmd_add(ns(kind="finding", value="http://t/dup2", title="独立成条用例",
+                          source="ut", origin="agent", confidence="high", req=reqf, resp=respf))
+        master_id = self._last_finding()["id"]
+        reqf2, respf2 = _pkt_files("dd4")
+        pentdb.cmd_add(ns(kind="finding", value="HTTP://T/dup2/", title="独立成条用例",
+                          source="ut", origin="agent", confidence="high",
+                          req=reqf2, resp=respf2, no_dedupe=True))
+        self.assertNotEqual(self._last_finding()["id"], master_id)
+        rep = lint()
+        self.assertTrue(any("同指纹 finding" in w for w in rep["warns"]))
+
+    def test_other_kinds_unaffected(self):
+        # 去重只作用于 finding：note 同 title 不同 value 照常各自入库（不并、不拒）
+        pentdb.cmd_add(ns(kind="note", value="http://t/n1", title="sql注入测试",
+                          source="ut", origin="agent", confidence="high"))
+        pentdb.cmd_add(ns(kind="note", value="http://t/n2", title="sql注入测试",
+                          source="ut", origin="agent", confidence="high"))
+        c = pentdb.connect()
+        n = c.execute("SELECT COUNT(*) FROM raw_events WHERE project=? AND kind='note' "
+                      "AND title='sql注入测试'", (PROJ,)).fetchone()[0]
+        c.close()
+        self.assertEqual(n, 2)
 
 
 if __name__ == "__main__":

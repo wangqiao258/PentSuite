@@ -29,6 +29,15 @@ def rows_to_dicts(rows):
     return [dict(r) for r in rows]
 
 
+def int_param(q, name, default="0"):
+    """query 参数安全转 int：非数字/缺失返回 None（路由层转 400 JSON，
+    不让裸 ValueError 逃出 do_GET 造成客户端连接断开）。"""
+    try:
+        return int(q.get(name, [default])[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 # 漏洞生命周期（与 raw_events.status 人审态分离；存 finding 行 attrs JSON）
 LIFE_CODES = ("open", "reproduced", "not-reproduced", "fixed", "reopened")
 
@@ -137,6 +146,22 @@ class Handler(BaseHTTPRequestHandler):
                 atype = q.get("atype", [""])[0]
                 status_f = q.get("status", [""])[0]
                 qry = q.get("q", [""])[0].lower()
+                # 响应码语义组多选（逗号分隔）：2xx/3xx/wall(401,403)/404/5xx/none(无码未探测)
+                cgs = [g.strip() for g in q.get("code_group", [""])[0].split(",") if g.strip()]
+                def code_hit(codes):
+                    if "none" in cgs and not codes:
+                        return True
+                    for x in codes or []:
+                        try:
+                            n = int(str(x)[:3])
+                        except (ValueError, TypeError):
+                            continue
+                        if "2xx" in cgs and 200 <= n < 300: return True
+                        if "3xx" in cgs and 300 <= n < 400: return True
+                        if "wall" in cgs and n in (401, 403): return True
+                        if "404" in cgs and 400 <= n < 500 and n not in (401, 403): return True
+                        if "5xx" in cgs and 500 <= n < 600: return True
+                    return False
                 out = []
                 for r in rows:
                     eids = json.loads(r["event_ids"] or "[]")
@@ -149,6 +174,8 @@ class Handler(BaseHTTPRequestHandler):
                     attrs = json.loads(r["attrs"] or "{}")
                     if qry and qry not in r["akey"].lower() \
                             and qry not in json.dumps(attrs, ensure_ascii=False).lower():
+                        continue
+                    if cgs and not code_hit(attrs.get("codes")):
                         continue
                     out.append({
                         "atype": r["atype"], "akey": r["akey"], "display": r["display"],
@@ -163,6 +190,34 @@ class Handler(BaseHTTPRequestHandler):
                 for a in out:
                     summary[a["atype"]] = summary.get(a["atype"], 0) + 1
                 self._json({"assets": out, "summary": summary})
+            elif u.path == "/api/asset-detail":
+                # 资产下钻明细：关联漏洞（parent_ext 归属解析）+ 观测事件所挂证据（只读）
+                p = q.get("project", [""])[0]
+                if not c.execute("SELECT 1 FROM projects WHERE name=?", (p,)).fetchone():
+                    return self._json({"error": "project not found"}, 404)
+                atype = q.get("atype", [""])[0]
+                akey = q.get("akey", [""])[0]
+                arow = c.execute("SELECT event_ids FROM assets WHERE project=? AND atype=? AND akey=?",
+                                 (p, atype, akey)).fetchone()
+                if not arow:
+                    return self._json({"error": "asset not found"}, 404)
+                import pentdb
+                eids = json.loads(arow["event_ids"] or "[]")
+                ev_sql = ("SELECT e.*, r.kind AS ev_kind, r.title AS ev_title FROM evidence e "
+                          "LEFT JOIN raw_events r ON r.id=e.event_id WHERE e.project=?")
+                args = [p]
+                if eids:
+                    ev_sql += " AND e.event_id IN (%s)" % ",".join("?" * len(eids))
+                    args += eids
+                else:
+                    ev_sql += " AND 0"  # 无观测事件：直接空证据集
+                evidence = []
+                for r in rows_to_dicts(c.execute(ev_sql + " ORDER BY e.id", args)):
+                    r["exists"] = os.path.exists(r["path"])
+                    evidence.append(r)
+                self._json({"findings": pentdb.findings_for_asset(c, p, atype, akey),
+                            "exec_packets": pentdb.exec_packets_for_asset(c, p, atype, akey),
+                            "evidence": evidence})
             elif u.path == "/api/evidence":
                 p = q.get("project", [""])[0]
                 sql = "SELECT e.*, r.kind AS ev_kind, r.title AS ev_title FROM evidence e " \
@@ -181,7 +236,9 @@ class Handler(BaseHTTPRequestHandler):
                     rows.append(r)
                 self._json({"evidence": rows})
             elif u.path == "/api/evidence/view":
-                eid = int(q.get("id", ["0"])[0])
+                eid = int_param(q, "id")
+                if eid is None:
+                    return self._json({"error": "bad id"}, 400)
                 row = c.execute("SELECT * FROM evidence WHERE id=?", (eid,)).fetchone()
                 if not row:
                     return self._json({"error": "no evidence"}, 404)
@@ -203,6 +260,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"id": eid, "name": os.path.basename(path), "path": path,
                             "note": row["note"], "sha256": row["sha256"],
                             "binary": binary, "content": "" if binary else content})
+            elif u.path == "/api/evidence/packet":
+                # exec .log → request/response 报文只读投影（不写库不改 evidence 表）。
+                # 解析失败/非 exec 日志返回 ok=false，前端降级回原文文件卡。
+                eid = int_param(q, "id")
+                if eid is None:
+                    return self._json({"error": "bad id"}, 400)
+                row = c.execute("SELECT * FROM evidence WHERE id=?", (eid,)).fetchone()
+                if not row:
+                    return self._json({"error": "no evidence"}, 404)
+                path = row["path"]
+                if not os.path.exists(path):
+                    return self._json({"error": "file missing", "path": path}, 404)
+                import pentdb
+                try:
+                    with open(path, "rb") as f:
+                        raw = f.read(262144)
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        text = raw.decode("gbk", "ignore")
+                    pkt = pentdb.parse_exec_packet(text)
+                except Exception as e:  # 读盘/解码意外：降级不抛
+                    pkt = None
+                    self.log_message("packet parse error #%s: %s", eid, e)
+                if pkt is None:
+                    return self._json({"ok": False, "id": eid,
+                                       "reason": "非 exec curl 日志或解析失败"})
+                self._json({"ok": True, "id": eid,
+                            "request": pkt["request"], "response": pkt["response"],
+                            "flags": pkt["flags"], "raw_path": path})
             elif u.path == "/api/timeline":
                 p = q.get("project", [""])[0]
                 events = rows_to_dicts(c.execute(
@@ -218,6 +305,23 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT * FROM raw_events WHERE project=? AND kind IN ('finding','osint') "
                     "ORDER BY id DESC", (p,)))
                 self._json({"findings": rows})
+            elif u.path == "/api/probes":
+                # probe 观测查询（只读）：host 参数支持精确与子域聚合（domain 节点查其下全部 host）
+                p = q.get("project", [""])[0]
+                host = q.get("host", [""])[0]
+                sql = ("SELECT id, value, title, attrs, status, origin, source, created_at "
+                       "FROM raw_events WHERE project=? AND kind='probe'")
+                args = [p]
+                if host:
+                    sql += " AND (value=? OR value LIKE ?)"
+                    args += [host, "%." + host]
+                rows = rows_to_dicts(c.execute(sql + " ORDER BY id DESC LIMIT 5000", args))
+                for r in rows:
+                    try:
+                        r["attrs"] = json.loads(r["attrs"] or "{}")
+                    except (ValueError, TypeError):
+                        r["attrs"] = {}
+                self._json({"probes": rows})
             elif u.path == "/api/suggestions":
                 p = q.get("project", [""])[0]
                 rows = rows_to_dicts(c.execute(
@@ -368,6 +472,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "id": row["id"] if row else None})
             finally:
                 c2.close()
+        if u.path == "/api/waive/confirm":
+            # 豁免确认（人的决定，对齐 CLI waive --wid N --confirm）：面板点击=人工确认，actor=human 留痕
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            project = (data.get("project") or "").strip()
+            wid = data.get("wid")
+            if not project or not wid:
+                return self._json({"error": "project/wid 必填"}, 400)
+            c0 = db()
+            try:
+                row = c0.execute("SELECT id, event_id, term, reason, confirmed FROM waives "
+                                 "WHERE id=? AND project=?", (wid, project)).fetchone()
+                if not row:
+                    return self._json({"error": f"豁免记录不存在: wid={wid}"}, 404)
+                if not row["confirmed"]:
+                    from pdb_findings import log_change
+                    c0.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
+                    log_change(c0, project, "waive-confirm",
+                               f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}（面板确认）",
+                               actor="human")
+                    c0.commit()
+                return self._json({"ok": True, "wid": wid,
+                                   "already": bool(row["confirmed"])})
+            finally:
+                c0.close()
         if u.path != "/api/review":
             return self._json({"error": "not found"}, 404)
         n = int(self.headers.get("Content-Length", 0))

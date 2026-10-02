@@ -12,8 +12,10 @@
   - 零第三方依赖（纯 stdlib）
 """
 import datetime
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -22,13 +24,13 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("PENTDB_DB") or os.path.join(BASE, "data", "pentdb.db")
 SOP_CFG = os.environ.get("PENTDB_SOP") or os.path.join(BASE, "sop", "default.json")
 
-VALID_KINDS = ("domain", "port", "path", "param", "finding", "osint", "note", "test", "suggestion")
+VALID_KINDS = ("domain", "port", "path", "param", "finding", "osint", "note", "test", "suggestion", "probe")
 VALID_STATUS = ("new", "confirmed", "rejected")
 VALID_ORIGIN = ("agent", "human", "migrate")
 VALID_SEVERITY = ("crit", "high", "med", "low", "info")
 VALID_SCOPE = ("in", "out", "unknown")
-FACT_KINDS = ("domain", "port", "path", "param", "test")  # 机器可验证事实：允许 --auto 自动确认
-ASSET_KINDS = ("domain", "port", "path", "param")         # 资产类观测：参与实体归并
+FACT_KINDS = ("domain", "port", "path", "param", "test", "probe")  # 机器可验证事实：允许 --auto 自动确认
+ASSET_KINDS = ("domain", "port", "path", "param")         # 资产类观测：参与实体归并（probe 是纯观测，不归并）
 STALE_DAYS = 30  # 资产生命周期：last_seen 超过 N 天视为 stale
 
 SCHEMA = """
@@ -122,11 +124,100 @@ CREATE TABLE IF NOT EXISTS assets (
   last_seen   TEXT DEFAULT '',
   PRIMARY KEY (project, atype, akey)
 );
+
+-- P0 防绕过审计触发器（2026-10-02）：纪律从"CLI 自觉"下沉为"DB 强制"——
+-- 任何写路径（含手编 SQLite）都被数据库本身拒绝。唯一例外通道：
+-- cmd_drop（人工 --confirm 高危操作）先 DROP 再经 executescript(SCHEMA) 恢复。
+CREATE TRIGGER IF NOT EXISTS trg_changelog_no_update
+BEFORE UPDATE ON changelog
+BEGIN
+  SELECT RAISE(ABORT, 'changelog 为 append-only 审计流，禁止 UPDATE（防洗库）');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_changelog_no_delete
+BEFORE DELETE ON changelog
+BEGIN
+  SELECT RAISE(ABORT, 'changelog 为 append-only 审计流，禁止 DELETE（防洗库）');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_reviews_no_update
+BEFORE UPDATE ON reviews
+BEGIN
+  SELECT RAISE(ABORT, 'reviews 为 append-only 人审流，禁止 UPDATE');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_reviews_no_delete
+BEFORE DELETE ON reviews
+BEGIN
+  SELECT RAISE(ABORT, 'reviews 为 append-only 人审流，禁止 DELETE（真删除走 drop --confirm）');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_waives_only_confirm
+BEFORE UPDATE ON waives
+WHEN NOT (OLD.confirmed = 0 AND NEW.confirmed = 1
+          AND OLD.project IS NEW.project AND OLD.event_id IS NEW.event_id
+          AND OLD.term IS NEW.term AND OLD.reason IS NEW.reason AND OLD.at IS NEW.at)
+BEGIN
+  SELECT RAISE(ABORT, 'waives 仅允许 confirmed 0→1（改字段/倒退改写一律拒绝）');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_waives_no_delete
+BEFORE DELETE ON waives
+BEGIN
+  SELECT RAISE(ABORT, 'waives 为 append-only，禁止 DELETE（真删除走 drop --confirm）');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_events_agent_insert
+BEFORE INSERT ON raw_events
+WHEN NEW.origin = 'agent' AND NEW.status = 'confirmed'
+     AND NEW.kind NOT IN ('domain','port','path','param','test','probe')
+BEGIN
+  SELECT RAISE(ABORT, 'agent 写入 confirmed 仅限机器可验证事实 kind（--auto 门禁 DB 侧兜底）');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_events_no_core_update
+BEFORE UPDATE ON raw_events
+WHEN OLD.kind IS NOT NEW.kind
+  OR OLD.project IS NOT NEW.project
+  OR OLD.created_at IS NOT NEW.created_at
+BEGIN
+  SELECT RAISE(ABORT, 'raw_events append-only：kind/project/created_at 不可改（观测归并锚点）');
+END;
 """
+
+# P0 审计触发器清单（与 SCHEMA 末尾 DDL 一一对应；cmd_drop 级联删除需短暂解除后恢复）
+AUDIT_TRIGGERS = (
+    "trg_changelog_no_update", "trg_changelog_no_delete",
+    "trg_reviews_no_update", "trg_reviews_no_delete",
+    "trg_waives_only_confirm", "trg_waives_no_delete",
+    "trg_events_agent_insert", "trg_events_no_core_update",
+)
 
 
 def now():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def dedup_key_for(value, title):
+    """finding 去重指纹：目标端点集合 + 漏洞身份（title）规范化后哈希前 16 位。
+    规范化：逗号分隔端点集排序去重（顺序无关）、剥 scheme://host 只留路径、
+    小写去空白；title 空白折叠小写。两端全空返回 ''（不参与去重）。
+    极端同指纹异漏洞（误并）可 --no-dedupe 逃生，changelog 全留痕可追溯。"""
+    def norm_val(v):
+        items = []
+        for part in (v or "").split(","):
+            p = part.strip().lower()
+            if not p:
+                continue
+            m = re.match(r"^[a-z][a-z0-9+.\-]*://[^/]+(/.*)$", p)  # 剥 scheme://host
+            if m:
+                p = m.group(1)
+            p = p.rstrip("/")
+            if p:
+                items.append(p)
+        return ",".join(sorted(set(items)))
+
+    def norm_title(t):
+        return re.sub(r"\s+", "", (t or "")).lower()
+
+    nv, nt = norm_val(value), norm_title(title)
+    if not nv and not nt:
+        return ""
+    basis = (nv or "-") + "||" + (nt or "-")
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
 
 
 def connect():
@@ -192,6 +283,16 @@ def connect():
     try:
         # changelog.actor：操作者（agent/human/机器采集），空=历史记录未知，不回填
         c.execute("ALTER TABLE changelog ADD COLUMN actor TEXT DEFAULT ''")
+        c.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        # raw_events.dedup_key：finding 去重指纹（写入口强制判重）。
+        # 仅首次加列时回填存量 finding 的指纹——只填列不合并，存量归并由人依 lint warn 裁决
+        c.execute("ALTER TABLE raw_events ADD COLUMN dedup_key TEXT DEFAULT ''")
+        for row in c.execute("SELECT id, value, title FROM raw_events WHERE kind='finding'").fetchall():
+            c.execute("UPDATE raw_events SET dedup_key=? WHERE id=?",
+                      (dedup_key_for(row["value"], row["title"]), row["id"]))
         c.commit()
     except sqlite3.OperationalError:
         pass
