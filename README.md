@@ -115,6 +115,26 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
    - **user** = `postgres.<项目ref>`（连接串里 `@` 前面那段）
    - **password** = 建项目时设置的数据库密码（忘了可在同页 Reset 重置）
    - port / dbname 已预填 `5432` / `postgres`，无需改动
+
+   填好的 `creds.json` 实例样式（占位值示意，以旧 pentest-kb-mcp 配置模板同款格式为例；**模板本体保持空值，拷贝后替换成真实值**——占位值原样留着会让 kb 误以为已配置而报连接错误）：
+
+   ```json
+   {
+     "host": "your-supabase-host.pooler.supabase.com",
+     "port": "5432",
+     "dbname": "postgres",
+     "user": "postgres.your-project-ref",
+     "password": "your-database-password"
+   }
+   ```
+
+   也可以不走文件、直接设环境变量（键名与旧 mcp.json 一致，优先级高于 creds.json）：
+
+   ```bash
+   set PENTEST_KB_DB_HOST=your-supabase-host.pooler.supabase.com
+   set PENTEST_KB_DB_USER=postgres.your-project-ref
+   set PENTEST_KB_DB_PASSWORD=your-database-password
+   ```
 3. **验证**：
 
 ```bash
