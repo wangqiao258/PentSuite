@@ -191,6 +191,25 @@ def now():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+# ---------------- exec 日志/证据读取统一口径（读上限 + 容错解码） ----------------
+
+EVIDENCE_READ_LIMIT = 262144  # 单次读取上限：server /api/evidence/* 与 exec 报文投影共用
+
+
+def decode_text_compat(raw):
+    """bytes 容错解码：utf-8 优先，失败转 gbk ignore（Windows 工具输出常见 GBK）。"""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("gbk", "ignore")
+
+
+def read_text_compat(path, limit=EVIDENCE_READ_LIMIT):
+    """读文件前 limit 字节并容错解码——exec 日志/证据原文读取统一入口；OSError 由调用方处置。"""
+    with open(path, "rb") as f:
+        return decode_text_compat(f.read(limit))
+
+
 def dedup_key_for(value, title):
     """finding 去重指纹：目标端点集合 + 漏洞身份（title）规范化后哈希前 16 位。
     规范化：逗号分隔端点集排序去重（顺序无关）、剥 scheme://host 只留路径、

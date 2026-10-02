@@ -22,7 +22,8 @@ import urllib.parse
 
 from pdb_assets import cmd_add, tests_for_asset
 from pdb_core import (AUDIT_TRIGGERS, DB_PATH, SCHEMA, VALID_STATUS,
-                      attach_evidence, connect, log_change, now, require_project)
+                      attach_evidence, connect, decode_text_compat, log_change,
+                      now, read_text_compat, require_project)
 
 # ---------------- 漏洞生命周期（CLI/面板共用；存 finding 行 attrs JSON，与 status 人审态分离） ----------------
 
@@ -172,10 +173,7 @@ def _exec_run(c, a):
         raw = (e.stdout or b"") + (e.stderr or b"")
         code = -1
         timed_out = True
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("gbk", "ignore")
+    text = decode_text_compat(raw)
     exec_dir = os.path.join(os.path.dirname(DB_PATH), "exec", a.project)
     os.makedirs(exec_dir, exist_ok=True)
     slug = re.sub(r"[^A-Za-z0-9_\-]+", "-", (a.action or cmd_str))[:40].strip("-") or "exec"
@@ -311,6 +309,18 @@ def parse_exec_packet(text):
     try:
         return _parse_exec_packet(text)
     except Exception:  # noqa: BLE001 —— 解析器不允许把异常漏给调用方
+        return None
+
+
+def parse_exec_log_file(path):
+    """exec 日志文件 → parse_exec_packet：读盘/解码/解析全链路降级，意外一律返回 None。
+
+    统一 exec_packets_for_asset 与 /api/evidence/packet 的三连样板
+    （EVIDENCE_READ_LIMIT 读上限 + utf-8→gbk 容错解码 + 解析降级）——
+    调用方只判 None，不再各自复制读文件/解码/异常处理。"""
+    try:
+        return parse_exec_packet(read_text_compat(path))
+    except Exception:  # noqa: BLE001 —— OSError（证据丢失）与意外同权降级
         return None
 
 
@@ -528,17 +538,8 @@ def exec_packets_for_asset(c, project, atype, akey, limit=10):
         (project,) + tuple(tids))
     out = []
     for ev in ev_rows:
-        try:
-            with open(ev["path"], "rb") as f:
-                raw = f.read(262144)  # 与 /api/evidence/view 同款读上限
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw.decode("gbk", "ignore")
-            pkt = parse_exec_packet(text)
-        except OSError:  # 证据文件丢失：静默跳过
-            continue
-        if pkt is None:  # 非 exec curl 日志（python 脚本/空壳）：静默跳过
+        pkt = parse_exec_log_file(ev["path"])
+        if pkt is None:  # 证据丢失/非 exec curl 日志（python 脚本/空壳）：静默跳过（降级原则不变）
             continue
         out.append({"ev_id": ev["id"], "event_id": ev["event_id"],
                     "sha256": ev["sha256"] or "", "created_at": ev["created_at"] or "",

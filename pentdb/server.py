@@ -245,8 +245,9 @@ class Handler(BaseHTTPRequestHandler):
                 path = row["path"]
                 if not os.path.exists(path):
                     return self._json({"error": "file missing", "path": path}, 404)
+                import pentdb
                 with open(path, "rb") as f:
-                    raw = f.read(262144)
+                    raw = f.read(pentdb.EVIDENCE_READ_LIMIT)
                 content, binary = "", False
                 for enc in ("utf-8", "gbk"):
                     try:
@@ -273,17 +274,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not os.path.exists(path):
                     return self._json({"error": "file missing", "path": path}, 404)
                 import pentdb
-                try:
-                    with open(path, "rb") as f:
-                        raw = f.read(262144)
-                    try:
-                        text = raw.decode("utf-8")
-                    except UnicodeDecodeError:
-                        text = raw.decode("gbk", "ignore")
-                    pkt = pentdb.parse_exec_packet(text)
-                except Exception as e:  # 读盘/解码意外：降级不抛
-                    pkt = None
-                    self.log_message("packet parse error #%s: %s", eid, e)
+                pkt = pentdb.parse_exec_log_file(path)  # 读盘/解码/解析全链路降级：意外返回 None
                 if pkt is None:
                     return self._json({"ok": False, "id": eid,
                                        "reason": "非 exec curl 日志或解析失败"})

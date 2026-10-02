@@ -37,10 +37,11 @@ PROBE_TOOL_RE = re.compile(
 URL_RE = re.compile(r"https?://", re.I)
 
 # ---- façade re-export（保持 pentdb.xxx 外部引用面不变；禁止 pdb_* 反向 import 本文件） ----
-from pdb_core import (ASSET_KINDS, BASE, DB_PATH, FACT_KINDS, SCHEMA, SOP_CFG,
-                      STALE_DAYS, VALID_KINDS, VALID_ORIGIN, VALID_SEVERITY,
-                      VALID_SCOPE, VALID_STATUS, attach_evidence, connect,
-                      log_change, now, require_project)
+from pdb_core import (ASSET_KINDS, BASE, DB_PATH, EVIDENCE_READ_LIMIT,
+                      FACT_KINDS, SCHEMA, SOP_CFG, STALE_DAYS, VALID_KINDS,
+                      VALID_ORIGIN, VALID_SEVERITY, VALID_SCOPE, VALID_STATUS,
+                      attach_evidence, connect, decode_text_compat, log_change,
+                      now, read_text_compat, require_project)
 from pdb_assets import (_norm_domain, _resolve_host, _split_hostport,
                         apply_review, asset_is_stale, asset_review_state,
                         cmd_add, cmd_archive, cmd_init, cmd_pending,
@@ -51,8 +52,9 @@ from pdb_assets import (_norm_domain, _resolve_host, _split_hostport,
 from pdb_findings import (CONCLUSION_LIFECYCLE, LIFE_CODES, TEST_CONCLUSIONS,
                           cmd_drop, cmd_evidence, cmd_evidence_move, cmd_exec,
                           cmd_lifecycle, cmd_migrate, cmd_verify, cmd_waive,
-                          exec_packets_for_asset, parse_exec_packet,
-                          set_lifecycle, sync_lifecycle_from_test)
+                          exec_packets_for_asset, parse_exec_log_file,
+                          parse_exec_packet, set_lifecycle,
+                          sync_lifecycle_from_test)
 from pdb_report import (FINDING_MARKS, STATE_ICON, VERIFY_FRAME, _hints_menu,
                         _parse_finding_detail, _pentest_report, _term_in,
                         cmd_sop, load_sop_cfg, sop_report)
