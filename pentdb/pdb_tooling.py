@@ -66,8 +66,8 @@ def cmd_panel(a):
                 print(f"[x] 端口 {port} 被 PID {','.join(pids)} 占用但无 HTTP 响应（旧面板残留？）。"
                       f"执行 taskkill /PID {','.join(pids)} /F 后重试")
             else:
-                print(f"[x] 面板启动失败且端口未被占用，请手动执行: python server.py --port {port} "
-                      f"（注意：AI 会话沙箱内 detached 子进程可能不存活，改用会话后台任务方式拉起）")
+                print(f"[x] 面板启动失败且端口未被占用。人手终端: python server.py --port {port}；"
+                      f"AI 会话: 改用 skill 随行 panel.py start（detached 子进程在沙箱内不存活）")
             sys.exit(1)
     if a.project:
         c = connect()
