@@ -279,7 +279,8 @@ class DropRestore(unittest.TestCase):
 class KbSignature(unittest.TestCase):
     def test_update_experience_has_no_status_param(self):
         """approve 门禁唯一通道：update 不得再接受 status（否则 Python 直调可绕过 --confirm）。"""
-        src = open(os.path.join(pentdb.BASE, "kb", "kb.py"), encoding="utf-8").read()
+        with open(os.path.join(pentdb.BASE, "kb", "kb.py"), encoding="utf-8") as f:
+            src = f.read()
         tree = ast.parse(src)
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "update_experience")

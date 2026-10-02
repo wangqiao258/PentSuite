@@ -139,13 +139,16 @@ def sop_report(c, project):
 
 def cmd_sop(a):
     c = connect()
-    require_project(c, a.project)
-    rep = sop_report(c, a.project)
-    print("== SOP hints: %s ==" % a.project)
-    print("提示项 %d | 已测 %d | 未测 %d（状态为关键词命中参考；真实覆盖由 AI 申报、人背书）"
-          % (rep["total"], rep["done"], rep["missing"]))
-    print("-- 按语义判断 when 是否命中当前目标面，命中才对照 check 查漏；未命中/不适用跳过并在收尾申报（提示层，非门禁）--")
-    for it in rep["hints"]:
-        ctx = "（%s）" % it["when"] if it["when"] else ""
-        tail = "" if it["state"] == "done" else "  ← 命中则补测，未命中/不适用跳过并在收尾申报"
-        print("  %-12s %-14s %s%s" % (STATE_ICON[it["state"]], it["term"], ctx, tail))
+    try:
+        require_project(c, a.project)
+        rep = sop_report(c, a.project)
+        print("== SOP hints: %s ==" % a.project)
+        print("提示项 %d | 已测 %d | 未测 %d（状态为关键词命中参考；真实覆盖由 AI 申报、人背书）"
+              % (rep["total"], rep["done"], rep["missing"]))
+        print("-- 按语义判断 when 是否命中当前目标面，命中才对照 check 查漏；未命中/不适用跳过并在收尾申报（提示层，非门禁）--")
+        for it in rep["hints"]:
+            ctx = "（%s）" % it["when"] if it["when"] else ""
+            tail = "" if it["state"] == "done" else "  ← 命中则补测，未命中/不适用跳过并在收尾申报"
+            print("  %-12s %-14s %s%s" % (STATE_ICON[it["state"]], it["term"], ctx, tail))
+    finally:
+        c.close()

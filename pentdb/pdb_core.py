@@ -220,82 +220,120 @@ def dedup_key_for(value, title):
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
 
 
+# ---------------- schema 迁移器（PRAGMA user_version 驱动） ----------------
+# connect() 正常路径只建连接（零 DDL/DML——裸 DML 会隐式持写锁，与面板/CLI 并发撞
+# "database is locked"）。建表/加列/回填只在 user_version 落后时由迁移步跑一次，每步
+# 完成即 commit 并推进 user_version。铁律：
+#   - sqlite connect() 禁裸 DML；
+#   - 迁移回填只能放在对应 ALTER 首次成功的分支内做，随即 commit 释放写锁；
+#   - 新增列一律追加迁移步并递增 SCHEMA_VERSION，不回改 SCHEMA 基线。
+SCHEMA_VERSION = 6
+
+
+def _mig_v1_schema(c):
+    """v0→v1：首次建表（SCHEMA 幂等，含全部基线列与 P0 审计触发器；executescript 自带隐式提交）。"""
+    c.executescript(SCHEMA)
+
+
+def _mig_v2_columns(c):
+    """v1→v2：历史列补齐（祖传库逐列 ALTER，撞重名列静默跳过；纯 DDL 无回填）。"""
+    for sql in (
+        "ALTER TABLE raw_events ADD COLUMN severity TEXT DEFAULT ''",
+        "ALTER TABLE raw_events ADD COLUMN code TEXT DEFAULT ''",
+        "ALTER TABLE raw_events ADD COLUMN tech TEXT DEFAULT ''",
+        "ALTER TABLE raw_events ADD COLUMN service TEXT DEFAULT ''",
+        "ALTER TABLE raw_events ADD COLUMN scope TEXT DEFAULT 'unknown'",
+        "ALTER TABLE raw_events ADD COLUMN verified_at TEXT DEFAULT ''",
+        "ALTER TABLE projects ADD COLUMN stages_enabled TEXT DEFAULT ''",
+        # projects.archived：归档标记（0=活跃，1=已归档）；面板下拉默认隐藏，数据保留可查
+        "ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0",
+        "ALTER TABLE raw_events ADD COLUMN stage TEXT DEFAULT ''",
+        "ALTER TABLE pending_tests ADD COLUMN stage TEXT DEFAULT ''",
+        "ALTER TABLE raw_events ADD COLUMN updated_at TEXT DEFAULT ''",
+        "ALTER TABLE raw_events ADD COLUMN attrs TEXT DEFAULT '{}'",
+    ):
+        try:
+            c.execute(sql)
+        except sqlite3.OperationalError:
+            pass
+    c.commit()
+
+
+def _mig_v3_evidence_etype(c):
+    """v2→v3：evidence.etype（证据类型 request/response/file）。
+    仅在 ALTER 首次成功分支内做存量回填，随即 commit 释放写锁。"""
+    try:
+        c.execute("ALTER TABLE evidence ADD COLUMN etype TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        return
+    c.execute("UPDATE evidence SET etype='request' WHERE note LIKE 'request%'")
+    c.execute("UPDATE evidence SET etype='response' WHERE note LIKE 'response%'")
+    c.execute("UPDATE evidence SET etype='file' WHERE etype IS NULL OR etype=''")
+    c.commit()
+
+
+def _mig_v4_waives_confirmed(c):
+    """v3→v4：waives.confirmed（0=起草，AI 可起草不得自批；1=人工确认生效）。
+    仅首次加列时回填存量=已确认（祖传豁免不追溯，存量复核另走 waive --wid N --confirm）。"""
+    try:
+        c.execute("ALTER TABLE waives ADD COLUMN confirmed INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        return
+    c.execute("UPDATE waives SET confirmed=1")
+    c.commit()
+
+
+def _mig_v5_changelog_actor(c):
+    """v4→v5：changelog.actor（操作者 agent/human/机器采集名）；空=历史记录未知，不回填。"""
+    try:
+        c.execute("ALTER TABLE changelog ADD COLUMN actor TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        return
+    c.commit()
+
+
+def _mig_v6_dedup_key(c):
+    """v5→v6：raw_events.dedup_key（finding 去重指纹，写入口强制判重）。
+    仅首次加列时回填存量 finding 的指纹——只填列不合并，存量归并由人依 lint warn 裁决。"""
+    try:
+        c.execute("ALTER TABLE raw_events ADD COLUMN dedup_key TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        return
+    for row in c.execute("SELECT id, value, title FROM raw_events WHERE kind='finding'").fetchall():
+        c.execute("UPDATE raw_events SET dedup_key=? WHERE id=?",
+                  (dedup_key_for(row["value"], row["title"]), row["id"]))
+    c.commit()
+
+
+# 迁移步注册表：下标 i 的函数把 user_version i 推进到 i+1（与 SCHEMA_VERSION 同步维护）
+_MIGRATIONS = (_mig_v1_schema, _mig_v2_columns, _mig_v3_evidence_etype,
+               _mig_v4_waives_confirmed, _mig_v5_changelog_actor, _mig_v6_dedup_key)
+
+
+def _migrate(c):
+    """user_version 落后时逐版本跑迁移，每步完成即 commit；版本已最新则零 DDL/DML 直通。"""
+    ver = c.execute("PRAGMA user_version").fetchone()[0]
+    while ver < SCHEMA_VERSION:
+        _MIGRATIONS[ver](c)
+        ver += 1
+        c.execute(f"PRAGMA user_version={ver}")
+        c.commit()
+
+
 def connect():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
-    c.executescript(SCHEMA)
+    # 并发基础（面板 ThreadingHTTPServer 每请求新建连接 × CLI 并发写）：
+    # busy_timeout 每连接必设——撞锁时最多等 5s 而非立刻报 "database is locked"；
+    # journal_mode=WAL 持久化在库文件上，设一次即可——先查当前值，非 WAL 才写（PRAGMA 无锁开销）。
+    c.execute("PRAGMA busy_timeout=5000")
     try:
-        c.execute("ALTER TABLE raw_events ADD COLUMN severity TEXT DEFAULT ''")
+        if (c.execute("PRAGMA journal_mode").fetchone()[0] or "").lower() != "wal":
+            c.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE raw_events ADD COLUMN code TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    for col, dft in (("tech", "''"), ("service", "''"), ("scope", "'unknown'"), ("verified_at", "''")):
-        try:
-            c.execute(f"ALTER TABLE raw_events ADD COLUMN {col} TEXT DEFAULT {dft}")
-        except sqlite3.OperationalError:
-            pass
-    try:
-        c.execute("ALTER TABLE projects ADD COLUMN stages_enabled TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        # projects.archived：归档标记（0=活跃，1=已归档）；面板下拉默认隐藏，数据保留可查
-        c.execute("ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0")
-        c.commit()
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE raw_events ADD COLUMN stage TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE pending_tests ADD COLUMN stage TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE raw_events ADD COLUMN updated_at TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE raw_events ADD COLUMN attrs TEXT DEFAULT '{}'")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE evidence ADD COLUMN etype TEXT DEFAULT ''")
-        # 仅在首次加列时做存量回填（request/response/file），随即 commit 释放写锁
-        c.execute("UPDATE evidence SET etype='request' WHERE note LIKE 'request%'")
-        c.execute("UPDATE evidence SET etype='response' WHERE note LIKE 'response%'")
-        c.execute("UPDATE evidence SET etype='file' WHERE etype IS NULL OR etype=''")
-        c.commit()
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE waives ADD COLUMN confirmed INTEGER DEFAULT 0")
-        # 仅首次加列时回填存量=已确认（祖传豁免不追溯，存量复核另行走 waive --wid N --confirm），随即 commit 释放写锁
-        c.execute("UPDATE waives SET confirmed=1")
-        c.commit()
-    except sqlite3.OperationalError:
-        pass
-    try:
-        # changelog.actor：操作者（agent/human/机器采集），空=历史记录未知，不回填
-        c.execute("ALTER TABLE changelog ADD COLUMN actor TEXT DEFAULT ''")
-        c.commit()
-    except sqlite3.OperationalError:
-        pass
-    try:
-        # raw_events.dedup_key：finding 去重指纹（写入口强制判重）。
-        # 仅首次加列时回填存量 finding 的指纹——只填列不合并，存量归并由人依 lint warn 裁决
-        c.execute("ALTER TABLE raw_events ADD COLUMN dedup_key TEXT DEFAULT ''")
-        for row in c.execute("SELECT id, value, title FROM raw_events WHERE kind='finding'").fetchall():
-            c.execute("UPDATE raw_events SET dedup_key=? WHERE id=?",
-                      (dedup_key_for(row["value"], row["title"]), row["id"]))
-        c.commit()
-    except sqlite3.OperationalError:
-        pass
+        pass  # 个别文件系统/并发窗口下 WAL 不可用：退回默认 journal 模式，busy_timeout 仍兜底
+    _migrate(c)
     return c
 
 

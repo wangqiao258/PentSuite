@@ -128,8 +128,12 @@ class AssetTestPackets(unittest.TestCase):
         cls.ev_py = attach_log(t_host, PY_LOG, note="output python-probe")
         t_num = ev_id("test", "probe-numid")
         cls.ev_del = attach_log(t_num, CURL_LOG, note="output curl-to-delete")
-        row = pentdb.connect().execute(
-            "SELECT path FROM evidence WHERE id=?", (cls.ev_del,)).fetchone()
+        c = pentdb.connect()
+        try:
+            row = c.execute(
+                "SELECT path FROM evidence WHERE id=?", (cls.ev_del,)).fetchone()
+        finally:
+            c.close()
         os.remove(row[0])  # 模拟证据文件丢失
 
     # ---------------- tests_for_asset ----------------

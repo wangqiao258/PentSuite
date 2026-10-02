@@ -25,26 +25,32 @@ from pdb_core import (ASSET_KINDS, DB_PATH, FACT_KINDS, STALE_DAYS, VALID_KINDS,
 
 def cmd_init(a):
     c = connect()
-    if c.execute("SELECT 1 FROM projects WHERE name=?", (a.project,)).fetchone():
-        print(f"[=] 项目已存在: {a.project}")
-        return
-    c.execute("INSERT INTO projects(name, created_at) VALUES(?,?)", (a.project, now()))
-    log_change(c, a.project, "init", "阶段默认全开，AI/面板按目标与授权收窄")
-    c.commit()
-    print(f"[ok] 项目已建立: {a.project}  db={DB_PATH}")
+    try:
+        if c.execute("SELECT 1 FROM projects WHERE name=?", (a.project,)).fetchone():
+            print(f"[=] 项目已存在: {a.project}")
+            return
+        c.execute("INSERT INTO projects(name, created_at) VALUES(?,?)", (a.project, now()))
+        log_change(c, a.project, "init", "阶段默认全开，AI/面板按目标与授权收窄")
+        c.commit()
+        print(f"[ok] 项目已建立: {a.project}  db={DB_PATH}")
+    finally:
+        c.close()
 
 
 def _set_archived(project, flag):
     """归档/取消归档的公共核心：只翻标记，不动任何数据。真删除仍走 drop（--confirm）。"""
     c = connect()
-    require_project(c, project)
-    c.execute("UPDATE projects SET archived=? WHERE name=?", (flag, project))
-    action = "archive" if flag else "unarchive"
-    word = "已归档" if flag else "已取消归档"
-    log_change(c, project, action, f"项目 {project} {word}")
-    c.commit()
-    tip = "面板下拉默认隐藏，「含归档」开关可见；数据保留可查" if flag else "面板下拉恢复显示"
-    print(f"[ok] 项目 {project} {word}（{tip}）")
+    try:
+        require_project(c, project)
+        c.execute("UPDATE projects SET archived=? WHERE name=?", (flag, project))
+        action = "archive" if flag else "unarchive"
+        word = "已归档" if flag else "已取消归档"
+        log_change(c, project, action, f"项目 {project} {word}")
+        c.commit()
+        tip = "面板下拉默认隐藏，「含归档」开关可见；数据保留可查" if flag else "面板下拉恢复显示"
+        print(f"[ok] 项目 {project} {word}（{tip}）")
+    finally:
+        c.close()
 
 
 def cmd_archive(a):
@@ -93,6 +99,14 @@ def cmd_add(a):
         sys.exit("[x] test 事件必须带 --title 或 --detail 或 --note（过程描述），"
                  "纯脚本执行痕迹请勿入库——待审页只收可读记录")
     c = connect()
+    try:
+        _add_write(c, a, status, req_val, resp_val, req_text, resp_text)
+    finally:
+        c.close()
+
+
+def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
+    """cmd_add 的落库主体（连接由 cmd_add 持有并在 finally 关闭，测试直调不留泄漏连接）。"""
     require_project(c, a.project)
     # test 幂等：同 project+source+title+detail 指纹相同视为重复执行（如脚本双跑），拒绝入库
     if a.kind == "test":
@@ -358,22 +372,25 @@ def cmd_probe_import(a):
     if not os.path.exists(a.file):
         sys.exit(f"[x] 文件不存在: {a.file}")
     c = connect()
-    require_project(c, a.project)
-    rows = probe_parse_file(a.file, a.host or "", a.format or "auto")
-    if not rows:
-        sys.exit("[x] 未解析出任何探测行（检查 --format / --host / 文件格式）")
-    per_host = {}
-    for r in rows:
-        per_host[r["host"]] = per_host.get(r["host"], 0) + 1
-    print(f"[=] 解析 {len(rows)} 行 ｜ host {len(per_host)} 个 ｜ "
-          + " ｜ ".join(f"{h}:{n}" for h, n in sorted(per_host.items(), key=lambda x: -x[1])[:8])
-          + (" …" if len(per_host) > 8 else ""))
-    if a.dry_run:
-        print("[=] --dry-run：未入库")
-        return
-    ins, skip = probe_ingest(c, a.project, rows, a.source or a.file, a.parent_ext or "")
-    c.commit()
-    print(f"[ok] probe 观测入库 {ins} 条，跳过重复 {skip} 条 ｜ 面板资产页 host 详情「探测观测」页签可查")
+    try:
+        require_project(c, a.project)
+        rows = probe_parse_file(a.file, a.host or "", a.format or "auto")
+        if not rows:
+            sys.exit("[x] 未解析出任何探测行（检查 --format / --host / 文件格式）")
+        per_host = {}
+        for r in rows:
+            per_host[r["host"]] = per_host.get(r["host"], 0) + 1
+        print(f"[=] 解析 {len(rows)} 行 ｜ host {len(per_host)} 个 ｜ "
+              + " ｜ ".join(f"{h}:{n}" for h, n in sorted(per_host.items(), key=lambda x: -x[1])[:8])
+              + (" …" if len(per_host) > 8 else ""))
+        if a.dry_run:
+            print("[=] --dry-run：未入库")
+            return
+        ins, skip = probe_ingest(c, a.project, rows, a.source or a.file, a.parent_ext or "")
+        c.commit()
+        print(f"[ok] probe 观测入库 {ins} 条，跳过重复 {skip} 条 ｜ 面板资产页 host 详情「探测观测」页签可查")
+    finally:
+        c.close()
 
 
 
@@ -703,50 +720,76 @@ def asset_is_stale(last_seen, days=STALE_DAYS):
 
 def cmd_rebuild_assets(a):
     c = connect()
-    require_project(c, a.project)
-    counts = rebuild_assets(c, a.project)
-    log_change(c, a.project, "rebuild-assets",
-               " | ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "0")
-    c.commit()
-    total = sum(counts.values())
-    detail = " ｜ ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "空"
-    print(f"[ok] 实体层已重建: {a.project} ｜ {detail} ｜ 共 {total}")
+    try:
+        require_project(c, a.project)
+        counts = rebuild_assets(c, a.project)
+        log_change(c, a.project, "rebuild-assets",
+                   " | ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "0")
+        c.commit()
+        total = sum(counts.values())
+        detail = " ｜ ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "空"
+        print(f"[ok] 实体层已重建: {a.project} ｜ {detail} ｜ 共 {total}")
+    finally:
+        c.close()
 
 
 def cmd_query(a):
     c = connect()
-    require_project(c, a.project)
-    sql = "SELECT * FROM raw_events WHERE project=?"
-    args = [a.project]
-    if a.kind:
-        sql += " AND kind=?"
-        args.append(a.kind)
-    if a.status:
-        sql += " AND status=?"
-        args.append(a.status)
-    sql += " ORDER BY id"
-    rows = c.execute(sql, args).fetchall()
-    for r in rows:
-        line = f"#{r['id']} [{r['status']:9s}] {r['kind']:8s} {r['value']}"
-        if r["title"]:
-            line += f" ｜ {r['title']}"
-        if r["note"]:
-            line += f" ｜ {r['note'][:80]}"
-        print(line)
-        print(f"      source: {r['source'][:120]}")
-    print(f"-- 共 {len(rows)} 条")
+    try:
+        require_project(c, a.project)
+        sql = "SELECT * FROM raw_events WHERE project=?"
+        args = [a.project]
+        if a.kind:
+            sql += " AND kind=?"
+            args.append(a.kind)
+        if a.status:
+            sql += " AND status=?"
+            args.append(a.status)
+        sql += " ORDER BY id"
+        rows = c.execute(sql, args).fetchall()
+        for r in rows:
+            line = f"#{r['id']} [{r['status']:9s}] {r['kind']:8s} {r['value']}"
+            if r["title"]:
+                line += f" ｜ {r['title']}"
+            if r["note"]:
+                line += f" ｜ {r['note'][:80]}"
+            print(line)
+            print(f"      source: {r['source'][:120]}")
+        print(f"-- 共 {len(rows)} 条")
+    finally:
+        c.close()
 
 
 def cmd_pending(a):
     c = connect()
-    require_project(c, a.project)
-    rows = c.execute(
-        "SELECT * FROM raw_events WHERE project=? AND status='new' ORDER BY id",
-        (a.project,)).fetchall()
-    for r in rows:
-        print(f"#{r['id']} [{r['origin']:7s}/{r['confidence'] or '-':6s}] "
-              f"{r['kind']:8s} {r['value'][:70]} ｜ {(r['note'] or r['title'] or '')[:60]}")
-    print(f"-- 待审 {len(rows)} 条")
+    try:
+        require_project(c, a.project)
+        rows = c.execute(
+            "SELECT * FROM raw_events WHERE project=? AND status='new' ORDER BY id",
+            (a.project,)).fetchall()
+        for r in rows:
+            print(f"#{r['id']} [{r['origin']:7s}/{r['confidence'] or '-':6s}] "
+                  f"{r['kind']:8s} {r['value'][:70]} ｜ {(r['note'] or r['title'] or '')[:60]}")
+        print(f"-- 待审 {len(rows)} 条")
+    finally:
+        c.close()
+
+
+def apply_review(c, eid, action, note="", reviewer="human"):
+    """人审落库核心（CLI review 与面板 /api/review 共用，单一实现保证 reviews/changelog/
+    actor 语义一致）：改状态 + reviews 追加留痕 + changelog 留痕（actor=reviewer）。
+    事件不存在返回 None；已同值幂等跳过返回 "skip"（不重复写 reviews/changelog）；
+    正常落库返回所属 project。不 commit——由调用方决定提交时机（面板批量=单事务原子提交）。"""
+    row = c.execute("SELECT project, status FROM raw_events WHERE id=?", (eid,)).fetchone()
+    if not row:
+        return None
+    if row["status"] == action:
+        return "skip"
+    c.execute("UPDATE raw_events SET status=? WHERE id=?", (action, eid))
+    c.execute("INSERT INTO reviews(event_id, action, reviewer, note, at) VALUES(?,?,?,?,?)",
+              (eid, action, reviewer, note or "", now()))
+    log_change(c, row["project"], "review", f"#{eid} -> {action}", actor=reviewer or "human")
+    return row["project"]
 
 
 def cmd_review(a):
@@ -754,17 +797,16 @@ def cmd_review(a):
         sys.exit("[x] 必须指定 --confirm 或 --reject")
     action = "confirmed" if a.confirm else "rejected"
     c = connect()
-    require_project(c, a.project)
-    row = c.execute("SELECT * FROM raw_events WHERE id=? AND project=?",
-                    (a.id, a.project)).fetchone()
-    if not row:
-        sys.exit(f"[x] 事件不存在: #{a.id}")
-    if row["status"] == action:
-        print(f"[=] #{a.id} 已是 {action}，跳过")
-        return
-    c.execute("UPDATE raw_events SET status=? WHERE id=?", (action, a.id))
-    c.execute("INSERT INTO reviews(event_id, action, reviewer, note, at) VALUES(?,?,?,?,?)",
-              (a.id, action, a.reviewer, a.note or "", now()))
-    log_change(c, a.project, "review", f"#{a.id} -> {action}", actor=a.reviewer or "human")
-    c.commit()
-    print(f"[ok] #{a.id} -> {action}")
+    try:
+        require_project(c, a.project)
+        if not c.execute("SELECT 1 FROM raw_events WHERE id=? AND project=?",
+                         (a.id, a.project)).fetchone():
+            sys.exit(f"[x] 事件不存在: #{a.id}")
+        r = apply_review(c, a.id, action, note=a.note or "", reviewer=a.reviewer or "human")
+        c.commit()
+        if r == "skip":
+            print(f"[=] #{a.id} 已是 {action}，跳过")
+        else:
+            print(f"[ok] #{a.id} -> {action}")
+    finally:
+        c.close()

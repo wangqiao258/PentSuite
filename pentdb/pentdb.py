@@ -42,11 +42,12 @@ from pdb_core import (ASSET_KINDS, BASE, DB_PATH, FACT_KINDS, SCHEMA, SOP_CFG,
                       VALID_SCOPE, VALID_STATUS, attach_evidence, connect,
                       log_change, now, require_project)
 from pdb_assets import (_norm_domain, _resolve_host, _split_hostport,
-                        asset_is_stale, asset_review_state, cmd_add, cmd_archive,
-                        cmd_init, cmd_pending, cmd_probe_import, cmd_query,
-                        cmd_rebuild_assets, cmd_review, cmd_unarchive,
-                        findings_for_asset, probe_ingest, probe_parse_file,
-                        rebuild_assets, tests_for_asset)
+                        apply_review, asset_is_stale, asset_review_state,
+                        cmd_add, cmd_archive, cmd_init, cmd_pending,
+                        cmd_probe_import, cmd_query, cmd_rebuild_assets,
+                        cmd_review, cmd_unarchive, findings_for_asset,
+                        probe_ingest, probe_parse_file, rebuild_assets,
+                        tests_for_asset)
 from pdb_findings import (CONCLUSION_LIFECYCLE, LIFE_CODES, TEST_CONCLUSIONS,
                           cmd_drop, cmd_evidence, cmd_evidence_move, cmd_exec,
                           cmd_lifecycle, cmd_migrate, cmd_verify, cmd_waive,
@@ -233,18 +234,29 @@ def lint_report(c, project, journal_check=True):
 
 def cmd_lint(a):
     c = connect()
-    require_project(c, a.project)
-    rep = lint_report(c, a.project, journal_check=not getattr(a, "no_journal", False))
-    for e in rep["errors"]:
-        print(f"ERROR {e}")
-    for w in rep["warns"]:
-        print(f"WARN  {w}")
-    print(f"-- lint: {len(rep['errors'])} error, {len(rep['warns'])} warn")
-    sys.exit(1 if rep["errors"] else 0)
+    try:
+        require_project(c, a.project)
+        rep = lint_report(c, a.project, journal_check=not getattr(a, "no_journal", False))
+        for e in rep["errors"]:
+            print(f"ERROR {e}")
+        for w in rep["warns"]:
+            print(f"WARN  {w}")
+        print(f"-- lint: {len(rep['errors'])} error, {len(rep['warns'])} warn")
+        sys.exit(1 if rep["errors"] else 0)
+    finally:
+        c.close()
 
 
 def cmd_report(a):
     c = connect()
+    try:
+        _report_run(c, a)
+    finally:
+        c.close()
+
+
+def _report_run(c, a):
+    """cmd_report 的出报告主体（连接由 cmd_report 持有并在 finally 关闭）。"""
     require_project(c, a.project)
     # 报告出口门禁：lint 有 error 拒绝出报告（防"收尾忘了跑 lint"绕过；--force 仅限人工解除）
     rep = lint_report(c, a.project)

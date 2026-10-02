@@ -70,8 +70,12 @@ class DropCascade(unittest.TestCase):
         pentdb.cmd_init(argparse.Namespace(project=proj))
         add(project=proj, kind="domain", value="d.example.com",
             source="ut", auto=True, status="confirmed", confidence="high")
-        n = len([r for r in pentdb.connect().execute(
-            "SELECT 1 FROM assets WHERE project=?", (proj,))])
+        c = pentdb.connect()
+        try:
+            n = len([r for r in c.execute(
+                "SELECT 1 FROM assets WHERE project=?", (proj,))])
+        finally:
+            c.close()
         self.assertGreater(n, 0, "前置失败：add 后应有实体行")
         pentdb.cmd_drop(argparse.Namespace(project=proj, confirm=True))
         c = pentdb.connect()
@@ -215,8 +219,12 @@ class ArchiveRoundtrip(unittest.TestCase):
         pentdb.cmd_init(argparse.Namespace(project=proj))
         add(kind="domain", value="arch.example.com", project=proj,
             origin="human", status="confirmed")
-        before = pentdb.connect().execute(
-            "SELECT COUNT(*) FROM raw_events WHERE project=?", (proj,)).fetchone()[0]
+        c = pentdb.connect()
+        try:
+            before = c.execute(
+                "SELECT COUNT(*) FROM raw_events WHERE project=?", (proj,)).fetchone()[0]
+        finally:
+            c.close()
         self.assertGreater(before, 0)
 
         pentdb.cmd_archive(argparse.Namespace(project=proj))
@@ -233,16 +241,24 @@ class ArchiveRoundtrip(unittest.TestCase):
         c.close()
 
         pentdb.cmd_unarchive(argparse.Namespace(project=proj))
-        self.assertEqual(pentdb.connect().execute(
-            "SELECT archived FROM projects WHERE name=?", (proj,)).fetchone()[0], 0)
+        c = pentdb.connect()
+        try:
+            self.assertEqual(c.execute(
+                "SELECT archived FROM projects WHERE name=?", (proj,)).fetchone()[0], 0)
+        finally:
+            c.close()
 
     def test_archive_changelog_tombstone(self):
         proj = "archive-ut2"
         pentdb.cmd_init(argparse.Namespace(project=proj))
         pentdb.cmd_archive(argparse.Namespace(project=proj))
-        row = pentdb.connect().execute(
-            "SELECT action, detail FROM changelog WHERE project=? AND action='archive' "
-            "ORDER BY id DESC LIMIT 1", (proj,)).fetchone()
+        c = pentdb.connect()
+        try:
+            row = c.execute(
+                "SELECT action, detail FROM changelog WHERE project=? AND action='archive' "
+                "ORDER BY id DESC LIMIT 1", (proj,)).fetchone()
+        finally:
+            c.close()
         self.assertIsNotNone(row)
         self.assertIn(proj, row["detail"])
 
@@ -251,8 +267,12 @@ class ArchiveRoundtrip(unittest.TestCase):
         proj = "archive-ut3"
         pentdb.cmd_init(argparse.Namespace(project=proj))
         pentdb.cmd_archive(argparse.Namespace(project=proj))
-        rows = list(pentdb.connect().execute(
-            "SELECT name, archived FROM projects ORDER BY archived, name"))
+        c = pentdb.connect()
+        try:
+            rows = list(c.execute(
+                "SELECT name, archived FROM projects ORDER BY archived, name"))
+        finally:
+            c.close()
         archived_flags = [r["archived"] for r in rows]
         self.assertEqual(archived_flags, sorted(archived_flags))
 

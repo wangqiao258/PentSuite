@@ -38,11 +38,17 @@ def _load_config():
     if not all(cfg.get(k) for k in REQUIRED_KEYS) and os.path.exists(_CREDS_FILE):
         try:
             local = json.load(open(_CREDS_FILE, encoding="utf-8"))
-            for k in ("host", "port", "dbname", "user", "password"):
+            for k in ("host", "port", "dbname", "user", "password", "connect_timeout"):
                 if not cfg.get(k):
                     cfg[k] = local.get(k)
         except Exception:
             pass
+    # 建连超时兜底（psycopg2 connect_timeout，秒）：缺省 5s，creds.json 显式 connect_timeout
+    # 键或环境变量可覆盖——防建连挂死拖垮连接池初始化。
+    try:
+        cfg["connect_timeout"] = int(cfg.get("connect_timeout") or 5)
+    except (TypeError, ValueError):
+        cfg["connect_timeout"] = 5
     return cfg
 
 

@@ -42,6 +42,7 @@ class TestJournalUnmatched(unittest.TestCase):
 
     def tearDown(self):
         pentdb.JOURNAL_DIR = self.old_dir
+        self.con.close()
 
     def _write(self, *cmds):
         with open(os.path.join(self.tmp, "2026-09-30.log"), "a", encoding="utf-8") as f:

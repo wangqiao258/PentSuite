@@ -514,27 +514,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "no ids"}, 400)
         if len(ids) > 1 and not note:
             return self._json({"error": "批量操作必须留批注（写入每条留痕，防止无脑盖章）"}, 400)
+        # 人审落库统一走 pdb 层 apply_review（与 CLI review 同一实现）：
+        # reviews 留痕 + changelog actor=human 语义一致；批量共用单连接单事务，finally 统一提交。
+        import pdb_assets
         c = db()
         try:
-            import datetime
-            now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-            ok, missing, projects = [], [], {}
+            ok, missing = [], []
             for eid in ids:
-                row = c.execute("SELECT project FROM raw_events WHERE id=?", (eid,)).fetchone()
-                if not row:
+                r = pdb_assets.apply_review(c, eid, action, note=note, reviewer="human")
+                if r is None:
                     missing.append(eid)
                     continue
-                c.execute("UPDATE raw_events SET status=? WHERE id=?", (action, eid))
-                c.execute("INSERT INTO reviews(event_id, action, reviewer, note, at) VALUES(?,?,?,?,?)",
-                          (eid, action, "human", note, now))
                 ok.append(eid)
-                projects.setdefault(row["project"], []).append(eid)
-            for proj, eids in projects.items():
-                detail = ("批量 " if len(eids) > 1 else "") + f"{action} #{','.join(map(str, eids))}"
-                if note:
-                    detail += f" ｜ {note}"
-                c.execute("INSERT INTO changelog(project, action, detail, at, actor) VALUES(?,?,?,?,?)",
-                          (proj, "review", detail + "（面板）", now, "human"))
             c.commit()
             self._json({"ok": True, "updated": ok, "missing": missing})
         finally:

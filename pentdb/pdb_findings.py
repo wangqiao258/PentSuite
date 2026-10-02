@@ -42,42 +42,45 @@ CONCLUSION_LIFECYCLE = {
 
 def cmd_waive(a):
     c = connect()
-    require_project(c, a.project)
-    confirm = getattr(a, "confirm", False)
-    wid = getattr(a, "wid", 0) or 0
-    if confirm:
-        # 确认生效是人的决定（对齐 kb approve --confirm 模式），AI 只能起草
-        if not wid:
-            sys.exit("[x] 确认豁免必须指定 --wid <豁免记录id>（waive 起草时输出）——豁免生效是人的决定，AI 只能起草")
-        row = c.execute("SELECT * FROM waives WHERE id=? AND project=?", (wid, a.project)).fetchone()
-        if not row:
-            sys.exit(f"[x] 豁免记录不存在: wid={wid}")
-        if row["confirmed"]:
-            print(f"[ok] wid={wid} 已是确认态，无需重复确认")
+    try:
+        require_project(c, a.project)
+        confirm = getattr(a, "confirm", False)
+        wid = getattr(a, "wid", 0) or 0
+        if confirm:
+            # 确认生效是人的决定（对齐 kb approve --confirm 模式），AI 只能起草
+            if not wid:
+                sys.exit("[x] 确认豁免必须指定 --wid <豁免记录id>（waive 起草时输出）——豁免生效是人的决定，AI 只能起草")
+            row = c.execute("SELECT * FROM waives WHERE id=? AND project=?", (wid, a.project)).fetchone()
+            if not row:
+                sys.exit(f"[x] 豁免记录不存在: wid={wid}")
+            if row["confirmed"]:
+                print(f"[ok] wid={wid} 已是确认态，无需重复确认")
+                return
+            c.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
+            log_change(c, a.project, "waive-confirm",
+                       f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}", actor="human")
+            c.commit()
+            print(f"[ok] wid={wid} 豁免已确认生效（#{row['event_id']} {row['term']}）")
             return
-        c.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
-        log_change(c, a.project, "waive-confirm",
-                   f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}", actor="human")
+        if not a.reason:
+            sys.exit("[x] 豁免必须写明 --reason；豁免为起草态，需人工 waive --wid N --confirm 确认后才生效")
+        if not (a.term or "").strip():
+            sys.exit("[x] 起草豁免必须写明 --term（豁免条目，如 无抓包待补 / test事件缺parent_ext）")
+        if a.id is None:
+            sys.exit("[x] 起草豁免必须指定 --id <事件id>（报文豁免挂 finding、归因豁免挂 test，豁免只作用于具体事件）；"
+                     "确认已有豁免用 --wid N --confirm")
+        row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?", (a.id, a.project)).fetchone()
+        if not row:
+            sys.exit(f"[x] 记录不存在: #{a.id}（豁免只作用于具体事件；SOP 提示项非义务，无需豁免）")
+        wcur = c.execute("INSERT INTO waives(project,event_id,term,reason,at,confirmed) VALUES(?,?,?,?,?,0)",
+                         (a.project, a.id, a.term, a.reason, now()))
+        log_change(c, a.project, "waive",
+                   f"wid={wcur.lastrowid} #{a.id} {a.term}: {a.reason}（起草，待人工确认）")
         c.commit()
-        print(f"[ok] wid={wid} 豁免已确认生效（#{row['event_id']} {row['term']}）")
-        return
-    if not a.reason:
-        sys.exit("[x] 豁免必须写明 --reason；豁免为起草态，需人工 waive --wid N --confirm 确认后才生效")
-    if not (a.term or "").strip():
-        sys.exit("[x] 起草豁免必须写明 --term（豁免条目，如 无抓包待补 / test事件缺parent_ext）")
-    if a.id is None:
-        sys.exit("[x] 起草豁免必须指定 --id <事件id>（报文豁免挂 finding、归因豁免挂 test，豁免只作用于具体事件）；"
-                 "确认已有豁免用 --wid N --confirm")
-    row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?", (a.id, a.project)).fetchone()
-    if not row:
-        sys.exit(f"[x] 记录不存在: #{a.id}（豁免只作用于具体事件；SOP 提示项非义务，无需豁免）")
-    wcur = c.execute("INSERT INTO waives(project,event_id,term,reason,at,confirmed) VALUES(?,?,?,?,?,0)",
-                     (a.project, a.id, a.term, a.reason, now()))
-    log_change(c, a.project, "waive",
-               f"wid={wcur.lastrowid} #{a.id} {a.term}: {a.reason}（起草，待人工确认）")
-    c.commit()
-    print(f"[ok] wid={wcur.lastrowid} 豁免已起草（#{a.id} {a.term}）——待人工确认后生效："
-          f"waive --project {a.project} --wid {wcur.lastrowid} --confirm")
+        print(f"[ok] wid={wcur.lastrowid} 豁免已起草（#{a.id} {a.term}）——待人工确认后生效："
+              f"waive --project {a.project} --wid {wcur.lastrowid} --confirm")
+    finally:
+        c.close()
 
 
 def cmd_evidence(a):
@@ -85,46 +88,55 @@ def cmd_evidence(a):
     默认把文件复制进套件 evidence/（随库走）；--keep-in-place 只存指针；
     --text 直接把文本内容存为证据文件（复测的请求/响应原文零摩擦落库）。"""
     c = connect()
-    require_project(c, a.project)
-    eid = attach_evidence(c, a.project, a.event_id, path=a.path, text=a.text,
-                          note=a.note, keep_in_place=a.keep_in_place)
-    c.commit()
-    tag = "引用" if a.keep_in_place else ("文本" if a.text is not None else "复制")
-    target = f"#{a.event_id}" if a.event_id else "项目级"
-    print(f"[ok] 证据 #{eid} 已挂到 {target}（{tag}）")
+    try:
+        require_project(c, a.project)
+        eid = attach_evidence(c, a.project, a.event_id, path=a.path, text=a.text,
+                              note=a.note, keep_in_place=a.keep_in_place)
+        c.commit()
+        tag = "引用" if a.keep_in_place else ("文本" if a.text is not None else "复制")
+        target = f"#{a.event_id}" if a.event_id else "项目级"
+        print(f"[ok] 证据 #{eid} 已挂到 {target}（{tag}）")
+    finally:
+        c.close()
 
 
 def cmd_evidence_move(a):
     """改挂证据归属：--event-id 0 = 转项目级物料。归属判定=复测该漏洞时必须用到。"""
     c = connect()
-    require_project(c, a.project)
-    row = c.execute("SELECT id, event_id FROM evidence WHERE id=? AND project=?",
-                    (a.id, a.project)).fetchone()
-    if not row:
-        sys.exit(f"[x] 证据不存在: #{a.id}")
-    if a.event_id != 0:
-        r = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?",
-                      (a.event_id, a.project)).fetchone()
-        if not r:
-            sys.exit(f"[x] 目标记录不存在: #{a.event_id}")
-    c.execute("UPDATE evidence SET event_id=? WHERE id=?", (a.event_id, a.id))
-    log_change(c, a.project, "evidence-move",
-               f"证据 #{a.id}: #{row['event_id']} -> {'项目级' if a.event_id == 0 else '#' + str(a.event_id)}")
-    c.commit()
-    print(f"[ok] 证据 #{a.id} 已改挂到 {'项目级' if a.event_id == 0 else '#' + str(a.event_id)}")
+    try:
+        require_project(c, a.project)
+        row = c.execute("SELECT id, event_id FROM evidence WHERE id=? AND project=?",
+                        (a.id, a.project)).fetchone()
+        if not row:
+            sys.exit(f"[x] 证据不存在: #{a.id}")
+        if a.event_id != 0:
+            r = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?",
+                          (a.event_id, a.project)).fetchone()
+            if not r:
+                sys.exit(f"[x] 目标记录不存在: #{a.event_id}")
+        c.execute("UPDATE evidence SET event_id=? WHERE id=?", (a.event_id, a.id))
+        log_change(c, a.project, "evidence-move",
+                   f"证据 #{a.id}: #{row['event_id']} -> {'项目级' if a.event_id == 0 else '#' + str(a.event_id)}")
+        c.commit()
+        print(f"[ok] 证据 #{a.id} 已改挂到 {'项目级' if a.event_id == 0 else '#' + str(a.event_id)}")
+    finally:
+        c.close()
 
 
 def cmd_verify(a):
     """复测打点：更新最后验证时间（数据时效）。"""
     c = connect()
-    require_project(c, a.project)
-    row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?", (a.id, a.project)).fetchone()
-    if not row:
-        sys.exit(f"[x] 记录不存在: #{a.id}")
-    c.execute("UPDATE raw_events SET verified_at=? WHERE id=?", (now(), a.id))
-    log_change(c, a.project, "verify", f"#{a.id} 复测打点")
-    c.commit()
-    print(f"[ok] #{a.id} 已更新验证时间")
+    try:
+        require_project(c, a.project)
+        row = c.execute("SELECT id FROM raw_events WHERE id=? AND project=?", (a.id, a.project)).fetchone()
+        if not row:
+            sys.exit(f"[x] 记录不存在: #{a.id}")
+        c.execute("UPDATE raw_events SET verified_at=? WHERE id=?", (now(), a.id))
+        log_change(c, a.project, "verify", f"#{a.id} 复测打点")
+        c.commit()
+        print(f"[ok] #{a.id} 已更新验证时间")
+    finally:
+        c.close()
 
 
 def cmd_exec(a):
@@ -132,14 +144,23 @@ def cmd_exec(a):
     输出强制落盘 + test 事件自动入库 + 原始输出自动挂证据，杜绝"测了没记"。
     test 事件经 cmd_add 写入口落库，结论→lifecycle 自动联动随之继承（单通道，无需另行挂钩）。
     用法：pentdb.py exec --project P --parent-ext N -- <命令...>（-- 后接实际命令，非交互）"""
-    import subprocess
-    import uuid
     if not (a.parent_ext or "").strip():
         sys.exit("[x] --parent-ext 必填：测试必须归因到被测对象 record id（多对象逗号分隔）")
     cmd_str = (a.cmd or "").strip()
     if not cmd_str:
         sys.exit("[x] 缺 --cmd：exec --project P --parent-ext N --cmd '<完整命令>'（命令串原样执行）")
     c = connect()
+    try:
+        _exec_run(c, a)
+    finally:
+        c.close()
+
+
+def _exec_run(c, a):
+    """cmd_exec 的执行主体（连接由 cmd_exec 持有并在 finally 关闭）。"""
+    import subprocess
+    import uuid
+    cmd_str = (a.cmd or "").strip()
     require_project(c, a.project)
     t0 = datetime.datetime.now()
     timed_out = False
@@ -581,16 +602,19 @@ def sync_lifecycle_from_test(c, project, test_id, note, parent_ext=""):
 def cmd_lifecycle(a):
     """复测结论同步：把机读结论落到 finding 生命周期（AI 走 CLI 的正式通道，面板同款留痕）。"""
     c = connect()
-    require_project(c, a.project)
-    row = c.execute("SELECT id, kind FROM raw_events WHERE id=? AND project=?",
-                    (a.id, a.project)).fetchone()
-    if not row:
-        sys.exit(f"[x] 记录不存在: #{a.id}")
-    if row["kind"] != "finding":
-        sys.exit("[x] lifecycle 只对 finding 生效（test 的结论走 note=，复测时间轴按机读词聚合）")
-    set_lifecycle(c, a.project, a.id, a.code, note=a.note, tag="（CLI）")
-    c.commit()
-    print(f"[ok] #{a.id} 生命周期 → {a.code}")
+    try:
+        require_project(c, a.project)
+        row = c.execute("SELECT id, kind FROM raw_events WHERE id=? AND project=?",
+                        (a.id, a.project)).fetchone()
+        if not row:
+            sys.exit(f"[x] 记录不存在: #{a.id}")
+        if row["kind"] != "finding":
+            sys.exit("[x] lifecycle 只对 finding 生效（test 的结论走 note=，复测时间轴按机读词聚合）")
+        set_lifecycle(c, a.project, a.id, a.code, note=a.note, tag="（CLI）")
+        c.commit()
+        print(f"[ok] #{a.id} 生命周期 → {a.code}")
+    finally:
+        c.close()
 
 
 def cmd_drop(a):
@@ -600,29 +624,40 @@ def cmd_drop(a):
     if not a.confirm:
         sys.exit("[x] 删除项目是高危操作，必须显式加 --confirm")
     c = connect()
-    require_project(c, a.project)
-    n = c.execute("SELECT COUNT(*) FROM raw_events WHERE project=?", (a.project,)).fetchone()[0]
-    ev_ids = [r[0] for r in c.execute("SELECT id FROM raw_events WHERE project=?", (a.project,))]
-    # drop 是人工 --confirm 的高危操作：级联删除会撞 append-only 触发器，
-    # 先短暂解除，删除完成后经 executescript(SCHEMA) 幂等恢复全部审计触发器
-    for t in AUDIT_TRIGGERS:
-        c.execute(f"DROP TRIGGER IF EXISTS {t}")
-    for t in ("raw_events", "assets", "pending_tests", "waives", "evidence"):
-        c.execute(f"DELETE FROM {t} WHERE project=?", (a.project,))
-    if ev_ids:
-        c.execute("DELETE FROM reviews WHERE event_id IN (%s)" %
-                  ",".join("?" * len(ev_ids)), ev_ids)
-    c.execute("DELETE FROM projects WHERE name=?", (a.project,))
-    c.executescript(SCHEMA)  # 幂等恢复全部审计触发器（executescript 自带隐式 COMMIT）
-    log_change(c, "__system__", "drop", f"项目 {a.project} 已删除（含 {n} 条事件）")
-    c.commit()
-    print(f"[ok] 项目 {a.project} 已删除（{n} 条事件），changelog 留痕")
+    try:
+        require_project(c, a.project)
+        n = c.execute("SELECT COUNT(*) FROM raw_events WHERE project=?", (a.project,)).fetchone()[0]
+        ev_ids = [r[0] for r in c.execute("SELECT id FROM raw_events WHERE project=?", (a.project,))]
+        # drop 是人工 --confirm 的高危操作：级联删除会撞 append-only 触发器，
+        # 先短暂解除，删除完成后经 executescript(SCHEMA) 幂等恢复全部审计触发器
+        for t in AUDIT_TRIGGERS:
+            c.execute(f"DROP TRIGGER IF EXISTS {t}")
+        for t in ("raw_events", "assets", "pending_tests", "waives", "evidence"):
+            c.execute(f"DELETE FROM {t} WHERE project=?", (a.project,))
+        if ev_ids:
+            c.execute("DELETE FROM reviews WHERE event_id IN (%s)" %
+                      ",".join("?" * len(ev_ids)), ev_ids)
+        c.execute("DELETE FROM projects WHERE name=?", (a.project,))
+        c.executescript(SCHEMA)  # 幂等恢复全部审计触发器（executescript 自带隐式 COMMIT）
+        log_change(c, "__system__", "drop", f"项目 {a.project} 已删除（含 {n} 条事件）")
+        c.commit()
+        print(f"[ok] 项目 {a.project} 已删除（{n} 条事件），changelog 留痕")
+    finally:
+        c.close()
 
 
 def cmd_migrate(a):
     kind_map = {"targets": "domain", "ports": "port", "paths": "path",
                 "params": "param", "findings": "finding", "tests": "test"}
     c = connect()
+    try:
+        _migrate_run(c, a)
+    finally:
+        c.close()
+
+
+def _migrate_run(c, a):
+    """cmd_migrate 的执行主体（连接由 cmd_migrate 持有并在 finally 关闭）。"""
     require_project(c, a.project)
     total = 0
     for fn, kind in kind_map.items():
