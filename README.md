@@ -27,14 +27,14 @@ PentSuite/
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；六视图全交互联动）
 │  │                       web/ 七文件：index.html + style.css + 5 个 app.*.js（core/findings/assets/queue/report，按视图域拆分；boot() 在 app.report.js 尾部触发；server.py 白名单静态路由）
 │  ├─ sop/default.json     SOP 提示清单（扁平 hints：when 触发语义 + check 提示术语，AI 查漏补缺用，无阶段）
-│  ├─ test_*.py            11 个单测（stdlib unittest，unittest discover 全跑）：核心/资产/实体下钻/exec/报文解析/审计门禁/journal/probe/面板参数/审计触发器(guards)/决策链(plan)
+│  ├─ tests/               12 个单测（stdlib unittest，unittest discover 全跑）：核心/资产/实体下钻/exec/报文解析/审计门禁/journal/probe/面板参数/审计触发器(guards)/决策链(plan)/sop 提示
 │  ├─ hooks/journal.py     PreToolUse hook：宿主命令流水落盘（hook-install 部署）
 │  ├─ kb/                  经验层单元（pentest-kb，Supabase 云端，强制脱敏）
 │  │  ├─ kb.py             经验库逻辑（CLI kb-* 子命令的实现）
 │  │  ├─ schema.sql        经验库建表 DDL（自建 Supabase 时执行）
 │  │  ├─ dict.txt          经验检索词典
 │  │  ├─ requirements.txt  经验层依赖清单（psycopg2/jieba/rank-bm25）
-│  │  └─ creds.json        经验库云凭据（空模板随仓库自带，填值即用）
+│  │  └─ creds_tpl.json    经验库云凭据模板（随仓库分发；拷贝为同目录 creds.json 后填值，creds.json 已 gitignore 不入库）
 │  └─ data/pentdb.db       SQLite 事实库（init 生成，仅存本机）
 ├─ skill/pentest-kb-workflow/SKILL.md   方法论 skill（纯 SKILL.md，直接装入）
 ├─ .venv/                  套件唯一运行时（bootstrap 创建）
@@ -108,7 +108,7 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 前置：PentDB CLI/面板零依赖；经验库需要 Python 3.10+（bootstrap 建 venv）。
 
 1. **装 skill**：把 `skill/pentest-kb-workflow/` 按所用客户端的技能方式装入（WorkBuddy：拖拽；Claude Code：复制到其 skills 目录；其他客户端：让 AI 直接读该文件亦可）。首次使用时 AI 会询问"PentSuite 克隆在哪个目录？"并把路径写入 skill 目录的 `home.txt`——一次配置，长期有效。
-2. **（可选）经验库**：`python pentdb/pentdb.py bootstrap`（建套件 .venv、装 kb 依赖）→ 注册 Supabase 免费实例 → SQL Editor 执行 `pentdb/kb/schema.sql` → 凭据模板 `pentdb/kb/creds.json` 已随仓库自带，填入 host / user / password 三项即用。若你打算把自己的副本推到别的仓库，先 `git update-index --skip-worktree pentdb/kb/creds.json` 让 git 停止跟踪它。不用经验库可全部跳过——PentDB 事实层全套零依赖照常可用。
+2. **（可选）经验库**：`python pentdb/pentdb.py bootstrap`（建套件 .venv、装 kb 依赖）→ 注册 Supabase 免费实例 → SQL Editor 执行 `pentdb/kb/schema.sql` → 拷贝凭据模板 `pentdb/kb/creds_tpl.json` 为同目录 `creds.json`（已被 .gitignore 排除，不会入库），填入 host / user / password 三项即用。不用经验库可全部跳过——PentDB 事实层全套零依赖照常可用。
 
    三个值都在 Supabase 控制台 **Project Settings → Database**：
    - **host** = Connection pooler 的主机名（形如 `xxx.pooler.supabase.com`）
@@ -121,9 +121,9 @@ python pentdb/pentdb.py report --project <目标> --template pentest --out repor
 python pentdb/pentdb.py init --project demo
 python pentdb/pentdb.py panel --project demo      # 浏览器打开输出的 URL
 python pentdb/pentdb.py kb search --keyword 测试   # 未配凭据时返回友好提示
-cd pentdb && python -m unittest discover -p "test_*.py"   # 全量回归（11 个测试文件，含 probe 观测层/审计触发器/决策链用例）
+.venv/Scripts/python.exe -m unittest discover -s pentdb/tests -t pentdb -p "test_*.py"   # 全量回归（仓库根执行，12 个测试文件，含 probe 观测层/审计触发器/决策链用例）
 ```
 
-- 数据存放：事实库 `pentdb/data/pentdb.db` 为本地文件，clone 后不存在、init 按需生成；凭据模板 `pentdb/kb/creds.json` 随仓库自带（空值），填入真实值后仅存本机、套件不会自动上传任何内容
+- 数据存放：事实库 `pentdb/data/pentdb.db` 为本地文件，clone 后不存在、init 按需生成；凭据模板 `pentdb/kb/creds_tpl.json` 随仓库自带（空值），拷贝为 `creds.json` 填入真实值后仅存本机（已被 .gitignore 排除）、套件不会自动上传任何内容
 - 旧机器迁移经验库凭据：`pentdb.py bootstrap --kb-creds <creds.json>`
 - 自用迁移（多机器带数据）：手工压缩整个目录（含 pentdb/data/），自行保管，与 GitHub 互不干扰
