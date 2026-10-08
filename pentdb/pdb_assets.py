@@ -82,6 +82,10 @@ def cmd_add(a):
     if a.origin not in VALID_ORIGIN:
         sys.exit(f"[x] origin 必须是 {'/'.join(VALID_ORIGIN)}")
     status = a.status
+    if status is None:
+        # 机器事实零接触入库：--auto 且 kind ∈ FACT_KINDS 缺省 confirmed（成熟 ASM 的
+        # 观测/判断分层——人审预算留给推断类）；显式 --status 始终优先
+        status = "confirmed" if (a.auto and a.kind in FACT_KINDS) else "new"
     if a.origin == "agent" and status == "confirmed":
         if not (a.auto and a.kind in FACT_KINDS):
             sys.exit("[x] AI 写入不允许直接置 confirmed（机器可验证事实加 --auto，仅限 "
@@ -112,12 +116,12 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
     if a.kind == "test":
         dup_t = c.execute(
             "SELECT id FROM raw_events WHERE project=? AND kind='test' AND source=? "
-            "AND title=? AND detail=? ORDER BY id LIMIT 1",
+            "AND title=? AND detail=? AND voided=0 ORDER BY id LIMIT 1",
             (a.project, a.source, a.title or "", a.detail or "")).fetchone()
         if dup_t:
             sys.exit(f"[x] 重复 test 事件：与 #{dup_t['id']} 来源与内容完全相同（脚本重复执行？），拒绝入库")
     if a.kind != "test":  # test 是事件流允许重复；事实类重复时：拒绝或按 --update 重扫语义更新
-        dup = c.execute("SELECT * FROM raw_events WHERE project=? AND kind=? AND value=? ORDER BY id LIMIT 1",
+        dup = c.execute("SELECT * FROM raw_events WHERE project=? AND kind=? AND value=? AND voided=0 ORDER BY id LIMIT 1",
                         (a.project, a.kind, a.value)).fetchone()
         if dup:
             if not a.update:
@@ -178,7 +182,7 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
         if dedup and not getattr(a, "no_dedupe", False):
             master = c.execute(
                 "SELECT id, title FROM raw_events WHERE project=? AND kind='finding' "
-                "AND dedup_key=? AND status!='rejected' ORDER BY id LIMIT 1",
+                "AND dedup_key=? AND status!='rejected' AND voided=0 ORDER BY id LIMIT 1",
                 (a.project, dedup)).fetchone()
             if master:
                 if not (req_val or resp_val):
@@ -348,7 +352,7 @@ def probe_ingest(c, project, rows, source, parent_ext="", origin="agent"):
     for r in rows:
         attrs = json.dumps({k: v for k, v in r.items() if k != "host" and v != ""},
                            ensure_ascii=False, sort_keys=True)
-        dup = c.execute("SELECT 1 FROM raw_events WHERE project=? AND kind='probe' AND value=? AND attrs=? LIMIT 1",
+        dup = c.execute("SELECT 1 FROM raw_events WHERE project=? AND kind='probe' AND value=? AND attrs=? AND voided=0 LIMIT 1",
                         (project, r["host"], attrs)).fetchone()
         if dup:
             skip += 1
@@ -459,7 +463,7 @@ def _resolve_host(parent_ext, by_id, path_host, seen=None):
 def rebuild_assets(c, project):
     """从资产类观测全量重建 assets 实体层。幂等、只派生、不触碰 raw_events。返回分类型计数。"""
     rows = [dict(r) for r in c.execute(
-        "SELECT * FROM raw_events WHERE project=? AND kind IN (%s) ORDER BY id"
+        "SELECT * FROM raw_events WHERE project=? AND kind IN (%s) AND voided=0 ORDER BY id"
         % ",".join("?" * len(ASSET_KINDS)), (project,) + ASSET_KINDS)]
     by_id = {r["id"]: r for r in rows}
     path_host = {}
@@ -616,7 +620,7 @@ def _asset_host_ctx(c, project):
     归属全靠 parent_ext 经 _finding_hosts 解析后做 host 级归因——本函数只建索引，
     被 findings_for_asset / tests_for_asset 共用（勿在此做任何匹配逻辑）。"""
     asset_rows = [dict(r) for r in c.execute(
-        "SELECT * FROM raw_events WHERE project=? AND kind IN (%s) ORDER BY id"
+        "SELECT * FROM raw_events WHERE project=? AND kind IN (%s) AND voided=0 ORDER BY id"
         % ",".join("?" * len(ASSET_KINDS)), (project,) + ASSET_KINDS)]
     by_id = {r["id"]: r for r in asset_rows}
     path_host = {}
@@ -662,7 +666,7 @@ def _match_asset(hs, atype, akey):
 def _rows_for_asset(c, project, kinds, atype, akey):
     """归属下钻共享核心：kinds 观测按 parent_ext 归属解析到指定资产，按 id 倒序。"""
     rows = [dict(r) for r in c.execute(
-        "SELECT * FROM raw_events WHERE project=? AND kind IN (%s) ORDER BY id DESC"
+        "SELECT * FROM raw_events WHERE project=? AND kind IN (%s) AND voided=0 ORDER BY id DESC"
         % ",".join("?" * len(kinds)), (project,) + tuple(kinds))]
     if not rows:
         return []
@@ -765,7 +769,7 @@ def cmd_pending(a):
     try:
         require_project(c, a.project)
         rows = c.execute(
-            "SELECT * FROM raw_events WHERE project=? AND status='new' ORDER BY id",
+            "SELECT * FROM raw_events WHERE project=? AND status='new' AND voided=0 ORDER BY id",
             (a.project,)).fetchall()
         for r in rows:
             print(f"#{r['id']} [{r['origin']:7s}/{r['confidence'] or '-':6s}] "

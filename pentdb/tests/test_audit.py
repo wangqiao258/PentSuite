@@ -227,14 +227,14 @@ class TestReconcileLint(AuditBase):
                           source="ut", origin="agent", confidence="high",
                           auto=True, status="confirmed", parent_ext="1"))
         rep = lint()
-        self.assertTrue(any("无任何证据输出" in w for w in rep["warns"]))
+        self.assertTrue(any("零留痕" in w for w in rep["warns"]))
 
     def test_conclusion_prefix_warn(self):
         pentdb.cmd_add(ns(kind="test", value="探测", title="结论不规范", note="随手写的散文结论",
                           source="ut", origin="agent", confidence="high",
                           auto=True, status="confirmed", parent_ext="1"))
         rep = lint()
-        self.assertTrue(any("机读词" in w for w in rep["warns"]))
+        self.assertTrue(any("结论词" in w for w in rep["warns"]))
 
     def test_proper_conclusion_no_warn(self):
         pentdb.cmd_add(ns(kind="test", value="探测2", title="结论规范", note="未复现：三轮均 403",
@@ -245,7 +245,7 @@ class TestReconcileLint(AuditBase):
                         "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()[0]
         c.close()
         rep = lint()
-        self.assertFalse(any("机读词" in w and f"#{rid}" in w for w in rep["warns"]))
+        self.assertFalse(any("结论词" in w and f"#{rid}" in w for w in rep["warns"]))
 
 
 class TestCaptureGate(AuditBase):
@@ -261,8 +261,8 @@ class TestCaptureGate(AuditBase):
                           source="ut", origin="agent", confidence="high",
                           waive_capture="初测报文丢失"))
         rep = lint()
-        self.assertTrue(any("缺请求/响应证据" in e for e in rep["errors"]))
-        self.assertTrue(any("待人工确认的豁免" in w for w in rep["warns"]))
+        self.assertTrue(any("无可重放报文" in e for e in rep["errors"]))
+        self.assertTrue(rep["draft_waives"])  # 起草豁免单列（不再混入 warns）
         c = pentdb.connect()
         wid = c.execute("SELECT id FROM waives WHERE project=? AND confirmed=0 "
                         "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()[0]
@@ -270,13 +270,89 @@ class TestCaptureGate(AuditBase):
         pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=wid, confirm=True,
                                             term="", reason=""))
         rep = lint()
-        self.assertFalse(any("缺请求/响应证据" in e for e in rep["errors"]))
-        self.assertFalse(any("待人工确认的豁免" in w for w in rep["warns"]))
+        self.assertFalse(any("无可重放报文" in e for e in rep["errors"]))
+        self.assertFalse(rep["draft_waives"])
 
     def test_waive_confirm_requires_wid(self):
         with self.assertRaises(SystemExit):
             pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=0, confirm=True,
                                                 term="", reason=""))
+
+    def test_waive_reject_restores_blocking(self):
+        # 作废通道（v7）：起草态豁免 --reject 终结（confirmed=2），对应阻断恢复、不进待确认清单
+        pentdb.cmd_add(ns(kind="finding", value="http://t/gate-reject", title="作废用例",
+                          source="ut", origin="agent", confidence="high",
+                          waive_capture="先起草后作废"))
+        c = pentdb.connect()
+        wid = c.execute("SELECT id FROM waives WHERE project=? AND confirmed=0 "
+                        "ORDER BY id DESC LIMIT 1", (PROJ,)).fetchone()[0]
+        c.close()
+        self.assertTrue(any("无可重放报文" in e for e in lint()["errors"]))
+        pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=wid, confirm=False,
+                                            reject=True, term="", reason=""))
+        rep = lint()
+        self.assertFalse(rep["draft_waives"])  # 作废后退出待确认清单
+        self.assertTrue(any("无可重放报文" in e for e in rep["errors"]))  # 阻断恢复
+        # 已作废不可再确认（confirm 分支跳过不翻转，状态保持 2）
+        pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=wid, confirm=True,
+                                            term="", reason=""))
+        c = pentdb.connect()
+        self.assertEqual(c.execute("SELECT confirmed FROM waives WHERE id=?", (wid,)).fetchone()[0], 2)
+        c.close()
+
+    def test_waive_reject_conflicts_with_confirm(self):
+        with self.assertRaises(SystemExit):
+            pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=1, confirm=True,
+                                                reject=True, term="", reason=""))
+
+    def test_void_removes_blocking_and_batch_waive(self):
+        # void 通道（v8）：作废冗余记录 → lint 阻断消失；批量 waive --wid 逗号分隔一次确认
+        pentdb.cmd_add(ns(kind="finding", value="http://t/void-a", title="作废记录A",
+                          source="ut", origin="agent", confidence="high",
+                          waive_capture="冗余记录A"))
+        pentdb.cmd_add(ns(kind="finding", value="http://t/void-b", title="作废记录B",
+                          source="ut", origin="agent", confidence="high",
+                          waive_capture="冗余记录B"))
+        c = pentdb.connect()
+        ids = [r[0] for r in c.execute(
+            "SELECT id FROM raw_events WHERE project=? AND value LIKE 'http://t/void-%' "
+            "ORDER BY id", (PROJ,))]
+        wids = [r[0] for r in c.execute(
+            "SELECT id FROM waives WHERE project=? AND confirmed=0 ORDER BY id", (PROJ,))]
+        c.close()
+        rep = lint()
+        self.assertEqual(sum(1 for e in rep["errors"] if "无可重放报文" in e
+                             and any(f"#{i}" in e for i in ids)), 2)
+        pentdb.cmd_void(argparse.Namespace(project=PROJ, id=0, ids=",".join(map(str, ids)),
+                                           reason="冗余记录批量作废", undo=False))
+        rep = lint()
+        self.assertFalse(any("无可重放报文" in e and any(f"#{i}" in e for i in ids)
+                             for e in rep["errors"]))  # 作废记录退出阻断
+        # 起草豁免还挂着（作废记录的豁免随记录失效，一并批量确认清账）
+        pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None,
+                                            wid=",".join(map(str, wids)), confirm=True,
+                                            reject=False, term="", reason=""))
+        c = pentdb.connect()
+        left = c.execute("SELECT COUNT(*) FROM waives WHERE project=? AND confirmed=0",
+                         (PROJ,)).fetchone()[0]
+        c.close()
+        self.assertEqual(left, 0)  # 批量确认后待确认清单清零
+
+    def test_void_undo_restores(self):
+        # 用缺归因的 test 记录观察 T-201（不牵涉豁免，避免 error/草稿泄漏到同类其他用例）
+        pentdb.cmd_add(ns(kind="test", value="void-undo-探测", title="误作废恢复",
+                          source="ut-void-undo", note="复现：无", origin="human",
+                          auto=False, status="confirmed", parent_ext=""))
+        c = pentdb.connect()
+        fid = c.execute("SELECT id FROM raw_events WHERE project=? AND value='void-undo-探测'",
+                        (PROJ,)).fetchone()[0]
+        c.close()
+        pentdb.cmd_void(argparse.Namespace(project=PROJ, id=fid, ids="", reason="误操作", undo=False))
+        rep = lint()
+        self.assertFalse(any("测试未关联被测对象" in e and f"#{fid}" in e for e in rep["errors"]))
+        pentdb.cmd_void(argparse.Namespace(project=PROJ, id=fid, ids="", reason="", undo=True))
+        rep = lint()
+        self.assertTrue(any("测试未关联被测对象" in e and f"#{fid}" in e for e in rep["errors"]))
 
     def test_report_gate_blocks_on_error_and_force_passes(self):
         pentdb.cmd_add(ns(kind="finding", value="http://t/gate-report", title="报告门禁用例",
@@ -320,7 +396,7 @@ class TestOsintEvidence(AuditBase):
         c.close()
         self.assertIsNotNone(ev)  # response 材料已挂 evidence
         rep = lint()
-        self.assertFalse(any("情报缺取证" in e and f"#{oid}" in e for e in rep["errors"]))
+        self.assertFalse(any("无取证材料" in e and f"#{oid}" in e for e in rep["errors"]))
 
     def test_osint_waive_draft_then_confirm(self):
         pentdb.cmd_add(ns(kind="osint", value="mail.example.com", title="丢材料情报",
@@ -336,12 +412,12 @@ class TestOsintEvidence(AuditBase):
         self.assertEqual(w["term"], "无取证待补")  # osint 豁免专用 term
         self.assertEqual(w["confirmed"], 0)  # 起草态不生效
         rep = lint()
-        self.assertTrue(any("情报缺取证" in e and f"#{oid}" in e for e in rep["errors"]))
+        self.assertTrue(any("无取证材料" in e and f"#{oid}" in e for e in rep["errors"]))
         # 人工确认（waive --wid N --confirm 的函数级等价调用）后生效
         pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=w["id"], confirm=True,
                                             term="", reason=""))
         rep = lint()
-        self.assertFalse(any("情报缺取证" in e and f"#{oid}" in e for e in rep["errors"]))
+        self.assertFalse(any("无取证材料" in e and f"#{oid}" in e for e in rep["errors"]))
 
     def test_waived_capture_term_matching(self):
         # "无取证待补"（osint）与 "无抓包待补"（finding）双 term 均应被 waived_capture 命中
@@ -356,11 +432,11 @@ class TestOsintEvidence(AuditBase):
                         "ORDER BY id DESC LIMIT 1", (PROJ, fid)).fetchone()["id"]
         c.close()
         rep = lint()
-        self.assertTrue(any("缺请求/响应证据" in e and f"#{fid}" in e for e in rep["errors"]))
+        self.assertTrue(any("无可重放报文" in e and f"#{fid}" in e for e in rep["errors"]))
         pentdb.cmd_waive(argparse.Namespace(project=PROJ, id=None, wid=wid, confirm=True,
                                             term="", reason=""))
         rep = lint()
-        self.assertFalse(any("缺请求/响应证据" in e and f"#{fid}" in e for e in rep["errors"]))
+        self.assertFalse(any("无可重放报文" in e and f"#{fid}" in e for e in rep["errors"]))
 
 
 class TestDedupe(AuditBase):
@@ -420,7 +496,7 @@ class TestDedupe(AuditBase):
                           req=reqf2, resp=respf2, no_dedupe=True))
         self.assertNotEqual(self._last_finding()["id"], master_id)
         rep = lint()
-        self.assertTrue(any("同指纹 finding" in w for w in rep["warns"]))
+        self.assertTrue(any("同指纹" in w for w in rep["warns"]))
 
     def test_other_kinds_unaffected(self):
         # 去重只作用于 finding：note 同 title 不同 value 照常各自入库（不并、不拒）

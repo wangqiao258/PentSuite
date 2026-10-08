@@ -124,7 +124,7 @@ class Lint(unittest.TestCase):
         self.assertIn(f"#{id1}", joined)
         self.assertIn("source", joined)
         self.assertIn(f"#{id2}", joined)
-        self.assertIn("parent_ext", joined)
+        self.assertIn("被测对象", joined)
         self.assertTrue(any("bogus" in w for w in rep["warns"]))
 
 

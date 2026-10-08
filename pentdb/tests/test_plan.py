@@ -18,6 +18,7 @@ pentdb.JOURNAL_DIR = os.path.join(tempfile.mkdtemp(prefix="pentdb-plan-test-"), 
 PROJ = "plan-ut"
 BASIS_KW = "缺判断依据"
 NEXT_KW = "缺【下一步】"
+EMPTY_KW = "无正文"
 
 
 def ns(**kw):
@@ -83,6 +84,14 @@ class SuggestionPlan(unittest.TestCase):
             detail="【已做】curl 探测 /admin\n【结论】403 WAF 拦截\n"
                    "【下一步】用 curl.exe 复测 GetWebPage 的 orderBy 注入点")
         self.assertEqual(hits(lint(), NEXT_KW), [])
+
+    def test_empty_body_is_health_not_blocking(self):
+        # S-201 降级（方案 C 重分类）：detail/note 全空属健康度提示（warns），不再阻断报告出口
+        add(kind="suggestion", value="plan-empty", title="批次计划")
+        rep = lint()
+        empty = [x for x in rep["warns"] if EMPTY_KW in x]
+        self.assertTrue(empty, "suggestion 正文全空应报健康度提示")
+        self.assertEqual([x for x in rep["errors"] if EMPTY_KW in x], [])
 
     def test_report_includes_latest_plan(self):
         # 字母序下前面用例已插入 plan-x/plan-y，这里补一条最新计划再验证报告引用"最新"

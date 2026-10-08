@@ -41,27 +41,118 @@ CONCLUSION_LIFECYCLE = {
 }
 
 
+def cmd_void(a):
+    """记录作废/恢复（人的决定，对齐 review 人审语义）：冗余/误录数据的清理通道，
+    区别于豁免（记录有效但证据取不回）。作废记录退出 lint 阻断、报告与面板主视图、
+    资产派生；只改 voided 标记，内容字段零改动（append-only 语义不破）。"""
+    c = connect()
+    try:
+        require_project(c, a.project)
+        undo = getattr(a, "undo", False)
+        ids = []
+        for raw in (getattr(a, "ids", "") or "").split(","):
+            raw = raw.strip()
+            if raw:
+                ids.append(int(raw))
+        if getattr(a, "id", 0):
+            ids.append(int(a.id))
+        if not ids:
+            sys.exit("[x] 必须指定 --id N 或 --ids N,M,…（作废只作用于具体事件）")
+        if not undo and not (a.reason or "").strip():
+            sys.exit("[x] 作废必须写明 --reason（为什么这条记录无效）——留痕可追溯")
+        act, newv, verb = ("un-void", 0, "恢复") if undo else ("void", 1, "作废")
+        done, skipped = [], []
+        for eid in ids:
+            row = c.execute("SELECT id, kind, title, value, voided FROM raw_events "
+                            "WHERE id=? AND project=?", (eid, a.project)).fetchone()
+            if not row:
+                skipped.append(f"#{eid}(不存在)")
+                continue
+            if row["voided"] == newv:
+                skipped.append(f"#{eid}(已是{'作废' if newv else '正常'}态)")
+                continue
+            c.execute("UPDATE raw_events SET voided=?, updated_at=? WHERE id=?",
+                      (newv, now(), eid))
+            log_change(c, a.project, act,
+                       f"#{eid} {row['kind']} {row['title'] or row['value']}: "
+                       f"{(a.reason or '').strip() or '（恢复，未写原因）'}",
+                       actor="human")
+            done.append(f"#{eid}")
+        c.commit()
+        if done:
+            print(f"[ok] 已{verb} {'、'.join(done)}"
+                  f"{'——退出 lint 阻断/报告/面板主视图' if not undo else ''}")
+        for s in skipped:
+            print(f"[=] 跳过 {s}")
+    finally:
+        c.close()
+
+
+def _parse_wids(wid):
+    """--wid 支持逗号分隔批量：waive --wid 34,35,36 --confirm。空/0 视为未指定。"""
+    out = []
+    for part in str(wid or "").replace("，", ",").split(","):
+        part = part.strip()
+        if part and part != "0":
+            out.append(int(part))
+    return out
+
+
 def cmd_waive(a):
     c = connect()
     try:
         require_project(c, a.project)
         confirm = getattr(a, "confirm", False)
-        wid = getattr(a, "wid", 0) or 0
+        reject = getattr(a, "reject", False)
+        wids = _parse_wids(getattr(a, "wid", 0))
+        if confirm and reject:
+            sys.exit("[x] --confirm 与 --reject 互斥：确认生效或作废二选一")
+        if reject:
+            # 作废豁免是人的决定：起草态（confirmed=0）终结为 2，留痕不删除；对应阻断随之恢复
+            if not wids:
+                sys.exit("[x] 作废豁免必须指定 --wid <id>（可逗号分隔批量）——作废是人的决定，AI 不得代行")
+            for wid in wids:
+                row = c.execute("SELECT * FROM waives WHERE id=? AND project=?",
+                                (wid, a.project)).fetchone()
+                if not row:
+                    print(f"[=] 跳过 wid={wid}（不存在）")
+                    continue
+                if row["confirmed"] == 2:
+                    print(f"[=] 跳过 wid={wid}（已是作废态）")
+                    continue
+                if row["confirmed"] == 1:
+                    sys.exit(f"[x] wid={wid} 已确认生效，不能作废——"
+                             f"已生效的豁免代表人的决定，改主意请修复后重录")
+                c.execute("UPDATE waives SET confirmed=2 WHERE id=?", (wid,))
+                log_change(c, a.project, "waive-reject",
+                           f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}",
+                           actor="human")
+                c.commit()
+                print(f"[ok] wid={wid} 豁免已作废（#{row['event_id']} {row['term']}）——"
+                      f"对应 lint 阻断恢复，如需放行请补证据或重新起草豁免")
+            return
         if confirm:
             # 确认生效是人的决定（对齐 kb approve --confirm 模式），AI 只能起草
-            if not wid:
-                sys.exit("[x] 确认豁免必须指定 --wid <豁免记录id>（waive 起草时输出）——豁免生效是人的决定，AI 只能起草")
-            row = c.execute("SELECT * FROM waives WHERE id=? AND project=?", (wid, a.project)).fetchone()
-            if not row:
-                sys.exit(f"[x] 豁免记录不存在: wid={wid}")
-            if row["confirmed"]:
-                print(f"[ok] wid={wid} 已是确认态，无需重复确认")
-                return
-            c.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
-            log_change(c, a.project, "waive-confirm",
-                       f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}", actor="human")
-            c.commit()
-            print(f"[ok] wid={wid} 豁免已确认生效（#{row['event_id']} {row['term']}）")
+            if not wids:
+                sys.exit("[x] 确认豁免必须指定 --wid <id>（可逗号分隔批量）——豁免生效是人的决定，AI 只能起草")
+            for wid in wids:
+                row = c.execute("SELECT * FROM waives WHERE id=? AND project=?",
+                                (wid, a.project)).fetchone()
+                if not row:
+                    print(f"[=] 跳过 wid={wid}（不存在）")
+                    continue
+                if row["confirmed"] == 1:
+                    print(f"[=] 跳过 wid={wid}（已是确认态）")
+                    continue
+                if row["confirmed"] == 2:
+                    print(f"[=] 跳过 wid={wid}（已作废，不能确认——需要放行请重新起草）")
+                    continue
+                c.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
+                log_change(c, a.project, "waive-confirm",
+                           f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}",
+                           actor="human")
+                c.commit()
+                print(f"[ok] wid={wid} 豁免已确认生效（#{row['event_id']} {row['term']}）")
             return
         if not a.reason:
             sys.exit("[x] 豁免必须写明 --reason；豁免为起草态，需人工 waive --wid N --confirm 确认后才生效")

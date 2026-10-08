@@ -1,5 +1,6 @@
 // PentDB 面板 · 发现·漏洞视图：列表/筛选/详情复测工作台/证据链（事件委托）
 let DEDUP_MAP={};  // dedup_key -> 该指纹下 finding 条数（列表打「同指纹」标用，loadFindings 刷新）
+let wvOnly=false;  // 「待豁免」筛选：只看有起草态豁免的记录（收尾决定跟随记录上下文）
 function lastRetest(fid){
   const fids=new Set([String(fid)]);
   const rel=TESTS.filter(t=>(t.parent_ext||"").split(",").map(s=>s.trim()).some(s=>fids.has(s)))
@@ -14,6 +15,7 @@ const frow=r=>{
     `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">`+
     `<span class="sev-dot sev-${r.severity||"none"}"></span><b>${esc(r.title||r.value)}</b> ${lifeTag(lifeOf(r))}`+
     (pend?`<span class="tag t-new">待审</span>`:"")+
+    (r.wv?`<span class="tag sev-med" title="${esc(r.wv.term)}：${esc(r.wv.reason||"")}">豁免待确认 wid=${r.wv.id}</span>`:"")+
     (DEDUP_MAP[r.dedup_key]>1?`<span class="tag" style="background:#FAC775;color:#412402">同指纹 ×${DEDUP_MAP[r.dedup_key]}</span>`:"")+
     `<span style="flex:1"></span><span class="muted">#${r.id}</span></div>`+
     `<div class="muted" style="font-size:12px;margin-top:2px">`+
@@ -90,6 +92,22 @@ function findingDetail(r){
     `<div class="muted" style="margin-top:8px">${(r.created_at||"")} · scope=${esc(r.scope||"unknown")}`+
     (r.dedup_key?` · 指纹 ${esc(r.dedup_key)}`:"")+"</div>";
   const life=lifeOf(r);
+  // 记录处置区（单轴顺序，对齐成熟产品：有效性先定，风险接受是确认后的分支）：
+  // 待审→确认采纳/驳回；确认后缺证据→豁免(won't fix)；驳回=终态 lint 已跳过；作废=数据卫生正交
+  const act=[];
+  const noEv=r.kind==="finding"?r.no_pkt:r.no_ev;
+  if(r.status==="new")act.push(`<button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认采纳</button>`+
+    ` <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button>`);
+  if(r.status==="confirmed"&&noEv){
+    if(r.wv)act.push(`<span class="tag sev-med">豁免待确认 wid=${r.wv.id}（${esc(r.wv.term)}）</span>`+
+      ` <button class="btn-ok" onclick="doWaiveRec('confirm',${r.wv.id})">确认豁免</button>`+
+      ` <button class="btn-no" onclick="doWaiveRec('reject',${r.wv.id})">作废豁免</button>`);
+    else act.push(`<button class="mini" onclick="doDraftWaive(${r.id})" title="记录有效但证据取不回时，起草豁免待人确认（AI 只能起草）">起草豁免</button>`);
+  }
+  act.push(`<button class="mini" onclick="doVoidRec(${r.id})" title="误录/冗余数据清理：作废记录退出 lint/报告/面板（留痕可 --undo 恢复）">作废记录</button>`);
+  const actHtml=`<div class="rec" style="margin:8px 0">`+
+    `<div class="hd" style="flex-wrap:wrap;gap:6px;align-items:center">${act.join("")}</div>`+
+    `<div class="muted" style="font-size:12px;margin-top:4px">先定有效性：确认采纳=进报告 ｜ 驳回=非漏洞（终态，lint 直接跳过）｜ 确认后缺证据 → 豁免（won't fix）或补证据 ｜ 作废=误录/冗余，退出一切视图</div></div>`;
   const lifeSel=isFinding?`<select id="life-quick" class="mini" onchange="setLife(${r.id},this.value)" title="快捷改生命周期（写 changelog 留痕）">`+
     (life?"":`<option value="">生命周期?</option>`)+
     LIFES.map(([k,label])=>`<option value="${k}" ${life===k?"selected":""}>${label}</option>`).join("")+`</select>`:"";
@@ -97,7 +115,8 @@ function findingDetail(r){
     `<span class="tag sev-${r.severity||"none"}">${sevLabel(r.severity)}</span>`+
     `<b style="font-size:15px">${esc(r.title||r.value)}</b> ${lifeSel} ${tag(r.status)} ${kindTag(r.kind)}`+
     `${r.ext_id?` <span class="muted">${esc(r.ext_id)}</span>`:""}<span style="flex:1"></span>`+
-    `<span class="muted">#${r.id} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span></div>`;
+    `<span class="muted">#${r.id} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span></div>`+
+    actHtml;
   if(isFinding){
     html+=`<div class="fd-tabs">${FD_TABS.map(([k,label])=>
       `<span class="fd-tab ${findTab===k?"on":""}" data-tab="${k}">${label}${k==="timeline"?`（${rel.length}）`:""}</span>`).join("")}</div>`;
@@ -135,6 +154,45 @@ async function setLife(fid,code){
   const r=await fetch("/api/retest",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({finding_id:fid,lifecycle:code})});
   if(!r.ok){alert("生命周期更新失败："+await r.text());return;}
+  loadFindings();
+}
+async function doWaiveRec(kind,wid){
+  const verb=kind==="confirm"?"确认":"作废";
+  const msg=kind==="confirm"
+    ?`确认豁免 wid=${wid}？\n确认后该条证据缺口不再计入 lint 阻断（人的决定，留痕不可逆）。`
+    :`作废豁免 wid=${wid}？\n作废后该放行草稿终结（留痕），对应证据缺口重新计入 lint 阻断。\n注意：豁免不是记录处置——记录本身仍按其状态处理（待审则还需确认采纳/驳回）。`;
+  if(!confirm(msg))return;
+  const r=await fetch(kind==="confirm"?"/api/waive/confirm":"/api/waive/reject",
+    {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:PROJECT,wid})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){alert(verb+"失败："+(d.error||r.status));return;}
+  loadFindings();
+}
+async function doDraftWaive(fid){
+  const term=prompt("豁免条目（如 无抓包待补）：","无抓包待补");
+  if(!term)return;
+  const reason=prompt("豁免理由（必填，为什么证据取不回）：","");
+  if(!reason||!reason.trim())return;
+  const r=await fetch("/api/waive/draft",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({project:PROJECT,id:fid,term:term.trim(),reason:reason.trim()})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){alert("起草失败："+(d.error||r.status));return;}
+  loadFindings();
+}
+async function doVoidRec(fid){
+  const reason=prompt("作废原因（必填：为什么这条记录无效/冗余）：","");
+  if(!reason||!reason.trim())return;
+  const r=await fetch("/api/void",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({project:PROJECT,ids:[fid],reason:reason.trim()})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){alert("作废失败："+(d.error||r.status));return;}
+  selFinding=null;
+  loadFindings();
+}
+// 报告·收尾页深链入口：切到发现页并开「待豁免」筛选（门禁页只读，决定在这里做）
+function goFindingsWaive(){
+  wvOnly=true;
+  switchTab("findings");
   loadFindings();
 }
 const evIsPkt=e=>e.etype==="request"||e.etype==="response"||(e.note&&(e.note.startsWith("request")||e.note.startsWith("response")));
@@ -298,8 +356,17 @@ async function loadFindings(){
   const q=((($("#f-find-q")||{}).value)||"").trim().toLowerCase();
   const matchQ=r=>!q||[r.title,r.value,r.detail,r.note].some(x=>(x||"").toLowerCase().includes(q));
   const st=r=>!findStatus||r.status===findStatus;
-  const fs=all.filter(r=>r.kind==="finding"&&st(r)&&matchQ(r)&&(sevFilter===null||(r.severity||"")===sevFilter));
-  const os=all.filter(r=>r.kind==="osint"&&st(r)&&matchQ(r));
+  const wv=r=>!wvOnly||!!r.wv;
+  const fs=all.filter(r=>r.kind==="finding"&&st(r)&&wv(r)&&matchQ(r)&&(sevFilter===null||(r.severity||"")===sevFilter));
+  const os=all.filter(r=>r.kind==="osint"&&st(r)&&wv(r)&&matchQ(r));
+  const wvN=all.filter(r=>r.wv).length;
+  $("#wv-chip").innerHTML=wvN?`<span class="sev-chip sev-med ${wvOnly?"on":""}" data-wv="1">待豁免 ${wvN}</span>`:"";
+  $("#wv-batch").classList.toggle("hidden",!(wvOnly&&wvN));
+  if(wvOnly&&wvN)$("#wv-batch").innerHTML=
+    `<span class="muted">批量处理（与逐条同样留痕不可逆）：</span>`+
+    `<button class="btn-ok" onclick="doWaiveBatch('confirm')">全部确认豁免</button> `+
+    `<button class="btn-no" onclick="doWaiveBatch('reject')">全部作废豁免</button>`+
+    `<span class="muted" style="margin-left:8px">确认=放行报告 ｜ 作废=恢复阻断</span>`;
   const bySev={}; fs.forEach(r=>{(bySev[r.severity||""]=bySev[r.severity||""]||[]).push(r)});
   $("#sev-chips").innerHTML=SEVS.map(([k,label])=>{
     const n=(bySev[k]||[]).length;
@@ -322,6 +389,22 @@ $("#sev-chips").onclick=e=>{
   sevFilter=(sevFilter===c.dataset.sev)?null:c.dataset.sev;
   loadFindings();
 };
+$("#wv-chip").onclick=e=>{
+  const c=e.target.closest("[data-wv]"); if(!c)return;
+  wvOnly=!wvOnly;
+  loadFindings();
+};
+async function doWaiveBatch(kind){
+  const ids=(lastFindings||[]).filter(r=>r.wv).map(r=>r.wv.id);
+  const verb=kind==="confirm"?"确认":"作废";
+  if(!ids.length)return;
+  if(!confirm(`批量${verb}全部 ${ids.length} 条待确认豁免？\n与逐条同样留痕不可逆${kind==="confirm"?"（确认后对应阻断解除）":"（作废后阻断恢复）"}。`))return;
+  const r=await fetch(kind==="confirm"?"/api/waive/confirm":"/api/waive/reject",
+    {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:PROJECT,wids:ids})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){alert("批量"+verb+"失败："+(d.error||r.status));return;}
+  loadFindings();
+}
 $("#findings-list").onclick=e=>findingListClick(e);
 $("#osint-list").onclick=e=>findingListClick(e);
 $("#finding-detail").onclick=e=>{

@@ -54,18 +54,36 @@ async function loadReview(){
   $("#review-table").innerHTML=html+"</tbody>";
   updBatch();
 }
+// suggestion(批次计划)行摘要：优先取【结论】+【下一步】段（决策所需），无段落标记则回退全文
+function suggestDigest(body){
+  const seg=(tag)=>{
+    const m=body.match(new RegExp("【"+tag+"】([\\s\\S]*?)(?=【[^】]*】|$)"));
+    return m?m[1].replace(/\s+/g," ").trim():"";
+  };
+  const concl=seg("结论"), next=seg("下一步");
+  let s="";
+  if(concl)s+="【结论】"+concl+"　";
+  if(next)s+="【下一步】"+next;
+  return esc((s||body.replace(/\s+/g," ")).slice(0,420))+(s.length>420?"…":"");
+}
 function rvRowHtml(r,gname,dupN){
   const attr=`${r.origin||""}${r.confidence?"/"+r.confidence:""}`;
+  // suggestion(批次计划)行：摘要取【结论】+【下一步】段并放宽，否则 120 字截断只露【已做】开头，用户无从决策
+  const isSug=r.kind==="suggestion";
   const badge=dupN?`<span class="tag" style="background:#FAC775;color:#412402">同值已有 confirmed ×${dupN}</span> `:"";
+  const sugHint=isSug?`<span class="tag" style="background:#BDE3FF;color:#0B4A7A">AI 计划 · 点行展开看全文</span> `:"";
+  // 决策自足：正文优先备注，备注为空回退 detail（suggestion/计划类内容在 detail）
+  const body=(r.note&&r.note.trim())?r.note:(r.detail||"");
+  const digest=body?(isSug?suggestDigest(body):esc(body).replace(/\s+/g," ").slice(0,120)):"";
   return `<tr class="rv-row" onclick="tgDetail(${r.id},this)">`+
     `<td onclick="event.stopPropagation()"><input type="checkbox" class="rv-check" data-g="${gname}" data-id="${r.id}" onchange="updBatch()"></td>`+
     `<td class="ell muted">#${r.id}</td>`+
     `<td>${kindTag(r.kind)}</td>`+
     `<td class="ell" title="${esc(r.value)}"><b>${esc(r.value)}</b></td>`+
-    `<td class="ell muted" title="${esc(r.note)}">${badge}${esc((r.note||"").slice(0,50))||"—"}</td>`+
+    `<td class="ell muted" title="${esc(isSug?body.slice(0,1200):body.slice(0,400))}">${sugHint}${badge}${digest||"—"}</td>`+
     `<td class="ell muted" title="${esc(attr)}">${esc(attr)}</td>`+
-    `<td onclick="event.stopPropagation()"><button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button></td></tr>`+
-    `<tr class="rv-detail hidden" data-did="${r.id}" data-q="${esc(r.value)}" data-note="${esc(r.note)}" data-kind="${esc(r.kind)}"><td colspan="7">`+
+    `<td onclick="event.stopPropagation()"><button class="btn-ok" onclick="doReview(${r.id},'confirmed')" ${isSug?'title="采纳：该计划成为报告「复测计划」节引用的唯一最新计划"':''}>${isSug?"采纳":"确认"}</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')" ${isSug?'title="忽略：报告将没有复测计划节，下次批次再出新计划可替代"':''}>${isSug?"忽略":"驳回"}</button></td></tr>`+
+    `<tr class="rv-detail hidden" data-did="${r.id}" data-q="${esc(r.value)}" data-note="${esc(body)}" data-kind="${esc(r.kind)}"><td colspan="7">`+
     `<div class="rv-inner"><span class='muted'>点行展开：判据卡（备注全文 + 同值历史 + 跳详情）</span></div></td></tr>`;
 }
 async function tgDetail(id,tr){
@@ -85,14 +103,24 @@ async function tgDetail(id,tr){
       const rd=await api("events",{project:PROJECT,value:q});
       rel=(rd.events||[]).filter(r=>r.id!==id);
     }
-    box.innerHTML=rvJudgeHtml(id,d.dataset.note||"",rel,q);
+    box.innerHTML=rvJudgeHtml(id,d.dataset.note||"",rel,q,d.dataset.kind||"");
   }catch(err){d.dataset.loaded="";box.innerHTML="<span class='muted'>加载失败: "+esc(err.message)+"（再点行重试）</span>";}
 }
-function rvJudgeHtml(id,note,rel,q){
+function fmtSections(s){
+  if(!s)return"";
+  return esc(s).replace(/【(已做|结论|下一步|描述|请求|payload|判据|原因|手工验证|修复)】/g,"\n<b>【$1】</b>");
+}
+function rvJudgeHtml(id,note,rel,q,kind){
   const by={}; rel.forEach(r=>{(by[r.status]=by[r.status]||[]).push(r)});
   const cnt=`已确认 ${(by.confirmed||[]).length} · 已驳回 ${(by.rejected||[]).length} · 其他待审 ${(by.new||[]).length}`;
-  let h=`<div class="muted" style="margin-bottom:4px"><b>备注全文</b></div>`+
-    `<div style="white-space:pre-wrap;margin-bottom:8px">${esc(note)||"<span class='muted'>（无备注）</span>"}</div>`;
+  let h="";
+  if(kind==="suggestion"){
+    h+=`<div class="rec" style="margin-bottom:8px"><b>这是什么：</b>AI 的批次收尾计划。`+
+      `<b>采纳</b>=该计划成为报告「复测计划」节引用的唯一最新计划；`+
+      `<b>忽略</b>=报告将没有复测计划节，下次批次再出新计划可替代。</div>`;
+  }
+  h+=`<div class="muted" style="margin-bottom:4px"><b>备注/详情全文</b></div>`+
+    `<div style="white-space:pre-wrap;margin-bottom:8px">${fmtSections(note)||"<span class='muted'>（无备注）</span>"}</div>`;
   h+=`<div class="muted" style="margin-bottom:4px"><b>同值历史</b>（${esc(q)} · 共 ${rel.length} 条：${cnt}）</div>`;
   h+=rel.length?rel.slice(0,8).map(r=>
       `<div class="rec"><div class="hd"><b>#${r.id}</b> ${kindTag(r.kind)} ${tag(r.status)}`+

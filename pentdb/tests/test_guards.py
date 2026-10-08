@@ -2,6 +2,7 @@
 
 覆盖：
   1. agent INSERT confirmed：fact kind 放行 / 推断 kind 拒绝（--auto 门禁 DB 侧兜底）
+  1b. --status 缺省规则：--auto+机器事实 → confirmed；推断类 → new；显式 --status 优先
   2. raw_events 核心列（kind/project/created_at）UPDATE 拒绝；普通观测列放行
   3. changelog / reviews append-only（UPDATE/DELETE 全拒）
   4. waives 仅允许 confirmed 0→1；改字段/重复确认/DELETE 拒绝
@@ -225,6 +226,24 @@ class WaiveGuard(unittest.TestCase):
         finally:
             c.close()
 
+    def test_reject_flip_allowed_from_draft(self):
+        # v7 触发器放行 0→2（人工作废）：起草态可直接翻转为作废
+        eid = self._eid()
+        c = pentdb.connect()
+        try:
+            c.execute("INSERT INTO waives(project,event_id,term,reason,at,confirmed) "
+                      "VALUES(?,?,?,?,?,0)", (PROJ, eid, "ut作废用例", "reject-flip", pentdb.now()))
+            wid = c.execute("SELECT id FROM waives WHERE project=? AND event_id=? "
+                            "ORDER BY id DESC LIMIT 1", (PROJ, eid)).fetchone()[0]
+            cur = c.execute("UPDATE waives SET confirmed=2 WHERE id=?", (wid,))
+            self.assertEqual(cur.rowcount, 1)
+            c.commit()
+            with self.assertRaises(sqlite3.IntegrityError):  # 2→x 一律拒绝（作废不可再翻转）
+                c.execute("UPDATE waives SET confirmed=0 WHERE id=?", (wid,))
+            c.rollback()
+        finally:
+            c.close()
+
     def test_reconfirm_and_field_edit_blocked(self):
         wid = self._wid()
         c = pentdb.connect()
@@ -274,6 +293,39 @@ class DropRestore(unittest.TestCase):
                 c.execute("UPDATE changelog SET detail='洗库' WHERE project='__system__'")
         finally:
             c.close()
+
+
+class AutoDefaultStatus(unittest.TestCase):
+    """--status 缺省规则：--auto + 机器事实 kind → confirmed（零接触）；推断类 → new；显式 --status 优先。"""
+
+    @classmethod
+    def setUpClass(cls):
+        _init_proj()
+
+    def _status_of(self, kind, value):
+        c = pentdb.connect()
+        try:
+            row = c.execute(
+                "SELECT status FROM raw_events WHERE project=? AND kind=? AND value=?",
+                (PROJ, kind, value)).fetchone()
+            return row[0] if row else None
+        finally:
+            c.close()
+
+    def test_auto_fact_defaults_confirmed(self):
+        add(project=PROJ, kind="path", value="/auto-default-path", source="ut",
+            auto=True, status=None, confidence="high")
+        self.assertEqual(self._status_of("path", "/auto-default-path"), "confirmed")
+
+    def test_inference_defaults_new(self):
+        add(project=PROJ, kind="note", value="auto-default-note", source="ut",
+            auto=False, status=None, confidence="high")
+        self.assertEqual(self._status_of("note", "auto-default-note"), "new")
+
+    def test_explicit_status_wins(self):
+        add(project=PROJ, kind="path", value="/auto-explicit-new", source="ut",
+            auto=True, status="new", confidence="high")
+        self.assertEqual(self._status_of("path", "/auto-explicit-new"), "new")
 
 
 class KbSignature(unittest.TestCase):

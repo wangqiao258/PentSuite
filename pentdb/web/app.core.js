@@ -57,14 +57,22 @@ function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">"
 async function loadOverview(){
   const d=await api("overview",{project:PROJECT});
   const sug=await api("suggestions",{project:PROJECT});
-  $("#sug-list").innerHTML=(sug.suggestions||[]).map(r=>
-    `<div class="fitem"><b>${esc(r.title||"建议")}</b> ${tag(r.status)} `+
+  // AI 建议卡（成熟产品式分层：结论摘要外露 → 全文 details 折叠 → CTA 悬停说明后果）
+  // 批次计划正文在 detail（note 为空），旧版只渲染 value/note 导致卡片信息量≈0
+  $("#sug-list").innerHTML=(sug.suggestions||[]).map(r=>{
+    const body=(r.note&&r.note.trim())?r.note:(r.detail||"");
+    const isPlan=/【(已做|结论|下一步)】/.test(body);
+    return `<div class="fitem"><b>${esc(r.title||"建议")}</b> ${tag(r.status)} `+
     `<span class="muted">#${r.id} · ${r.created_at} · ${r.origin}</span>`+
-    (r.value?`<div class="detail">${esc(r.value)}</div>`:"")+
-    (r.note?`<div class="muted">依据：${esc(r.note)}</div>`:"")+
+    (isPlan
+      ?`<div class="detail" style="margin-top:4px">${suggestDigest(body)}</div>`+
+       `<details style="margin-top:4px"><summary class="muted" style="cursor:pointer">展开完整计划（已做 / 结论 / 下一步）</summary>`+
+       `<div style="white-space:pre-wrap;margin-top:6px">${fmtSections(body)}</div></details>`
+      :(r.value?`<div class="detail">${esc(r.value)}</div>`:"")+
+       (r.note?`<div class="muted">依据：${esc(r.note)}</div>`:""))+
     `<div class="src">来源：${esc(r.source)}</div>`+
-    (r.status==="new"?`<div><button class="btn-ok" onclick="doReview(${r.id},'confirmed')">采纳</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">忽略</button></div>`:"")+
-    `</div>`).join("")||"<div class='muted'>暂无建议（AI 在采集/测试批次结束后生成）</div>";
+    (r.status==="new"?`<div><button class="btn-ok" title="采纳：该计划成为报告「复测计划」节引用的唯一最新计划" onclick="doReview(${r.id},'confirmed')">采纳</button> <button class="btn-no" title="忽略：报告将没有复测计划节，下次批次再出新计划可替代" onclick="doReview(${r.id},'rejected')">忽略</button></div>`:"")+
+    `</div>`;}).join("")||"<div class='muted'>暂无建议（AI 在采集/测试批次结束后生成）</div>";
   const st=d.by_status||{}, bk=d.by_kind||{};
   const card=(n,label,attrs)=>n>0
     ?`<div class="card click" ${attrs} title="点击查看明细"><b>${n}</b><span>${label}</span></div>`

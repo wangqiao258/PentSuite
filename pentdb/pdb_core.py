@@ -150,11 +150,11 @@ BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS trg_waives_only_confirm
 BEFORE UPDATE ON waives
-WHEN NOT (OLD.confirmed = 0 AND NEW.confirmed = 1
+WHEN NOT (OLD.confirmed = 0 AND NEW.confirmed IN (1, 2)
           AND OLD.project IS NEW.project AND OLD.event_id IS NEW.event_id
           AND OLD.term IS NEW.term AND OLD.reason IS NEW.reason AND OLD.at IS NEW.at)
 BEGIN
-  SELECT RAISE(ABORT, 'waives 仅允许 confirmed 0→1（改字段/倒退改写一律拒绝）');
+  SELECT RAISE(ABORT, 'waives 仅允许 confirmed 0→1（确认生效）或 0→2（人工作废）；改字段/倒退一律拒绝');
 END;
 CREATE TRIGGER IF NOT EXISTS trg_waives_no_delete
 BEFORE DELETE ON waives
@@ -246,7 +246,7 @@ def dedup_key_for(value, title):
 #   - sqlite connect() 禁裸 DML；
 #   - 迁移回填只能放在对应 ALTER 首次成功的分支内做，随即 commit 释放写锁；
 #   - 新增列一律追加迁移步并递增 SCHEMA_VERSION，不回改 SCHEMA 基线。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 
 def _mig_v1_schema(c):
@@ -324,9 +324,38 @@ def _mig_v6_dedup_key(c):
     c.commit()
 
 
+def _mig_v7_waive_reject(c):
+    """v6→v7：豁免作废通道——重建 trg_waives_only_confirm，放行 confirmed 0→2（人工作废）。
+    语义不变量保留：改字段/倒退（1→0、2→x）仍拒绝；作废后不可再翻转（trg 只放行 0→{1,2}）。"""
+    c.execute("DROP TRIGGER IF EXISTS trg_waives_only_confirm")
+    c.executescript("""
+CREATE TRIGGER trg_waives_only_confirm
+BEFORE UPDATE ON waives
+WHEN NOT (OLD.confirmed = 0 AND NEW.confirmed IN (1, 2)
+          AND OLD.project IS NEW.project AND OLD.event_id IS NEW.event_id
+          AND OLD.term IS NEW.term AND OLD.reason IS NEW.reason AND OLD.at IS NEW.at)
+BEGIN
+  SELECT RAISE(ABORT, 'waives 仅允许 confirmed 0→1（确认生效）或 0→2（人工作废）；改字段/倒退一律拒绝');
+END;
+""")
+    c.commit()
+
+
+def _mig_v8_voided(c):
+    """v7→v8：raw_events.voided（0=正常，1=人工作废）。
+    作废=记录级墓碑（冗余/误录数据清理通道，区别于豁免的"有效但证据取不回"）：
+    作废记录退出 lint 阻断、报告与面板主视图、资产派生；仅人经 CLI void 命令操作并留痕。"""
+    try:
+        c.execute("ALTER TABLE raw_events ADD COLUMN voided INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        return
+    c.commit()
+
+
 # 迁移步注册表：下标 i 的函数把 user_version i 推进到 i+1（与 SCHEMA_VERSION 同步维护）
 _MIGRATIONS = (_mig_v1_schema, _mig_v2_columns, _mig_v3_evidence_etype,
-               _mig_v4_waives_confirmed, _mig_v5_changelog_actor, _mig_v6_dedup_key)
+               _mig_v4_waives_confirmed, _mig_v5_changelog_actor, _mig_v6_dedup_key,
+               _mig_v7_waive_reject, _mig_v8_voided)
 
 
 def _migrate(c):

@@ -35,10 +35,12 @@
     <div class="filters">
       <input id="f-find-q" placeholder="搜索标题 / 目标 / detail…" style="flex:1;min-width:160px" oninput="loadFindings()">
       <span id="sev-chips" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+      <span id="wv-chip" style="display:flex"></span>
       <select id="f-find-status" onchange="findStatus=this.value;loadFindings()">
         <option value="">全部人审态</option><option>new</option><option>confirmed</option><option>rejected</option>
       </select>
     </div>
+    <div id="wv-batch" class="hidden panel" style="padding:6px 10px;margin-bottom:8px"></div>
     <div class="find-grid">
       <div class="panel" style="overflow:auto;max-height:calc(100vh - 200px)">
         <h3>漏洞 / 发现<span id="find-count" class="muted" style="margin-left:8px;font-weight:400"></span></h3>

@@ -43,7 +43,7 @@ PentSuite/
 
 ## 数据模型与状态机
 
-- `raw_events`（append-only 观测流）：kind: domain/port/path/param/finding/osint/note/test/suggestion/probe；source 必填；AI（origin=agent）必须带 confidence 且不得置 confirmed（--auto 仅限机器事实 domain/port/path/param/test/probe）
+- `raw_events`（append-only 观测流）：kind: domain/port/path/param/finding/osint/note/test/suggestion/probe；source 必填；AI（origin=agent）必须带 confidence；confirmed 仅限机器事实 kind（domain/port/path/param/test/probe）加 `--auto`，且此时**缺省即 confirmed**（机器事实零接触入库，显式 `--status new` 可留待审），推断类一律 new 进待审
 - `assets`（纯派生实体层）：观测流之上的归并层，对齐成熟 ASM 产品的"观测→实体→展示"三层。按规范 akey 归并为四类实体——domain（小写 FQDN，parent=注册域）、host（IP/主机名，从 port 观测提取）、service（host:port，parent=host）、endpoint（host+path，**已拍板：一律归 host**（parent_atype=host，不经 service），接受 akey 无 scheme/端口、同 host 的 http/https 同路径归并一行的副作用；param 并入 attrs.params 不再单独成行）；attrs 聚合端口/技术栈/服务/参数/状态码/scope；first_seen/last_seen 由 created_at/updated_at 派生。`rebuild-assets` 幂等全量重建（add/recon 后自动触发），人审聚合与生命周期（last_seen 超 30 天=stale）在面板侧实时计算，不落库
 - `pending_tests`（legacy 空表，阶段制退役后不再写入；同退役的还有 `raw_events.stage` / `projects.stages_enabled` 列与 `--merge-key` 参数——库中保留兼容但零读写）/ `waives` / `reviews` / `changelog`（留痕含 actor：agent=AI 经 CLI / human=人审动作，面板时间线可辨操作者）：append-only 由 P0 审计触发器在 DB 层强制——changelog/reviews 禁 UPDATE/DELETE，waives 仅允许 confirmed 0→1，raw_events 的 kind/project/created_at 禁改；任何写路径（含手编 SQLite）均被数据库本身拒绝，唯一解除通道=`drop --confirm`
 - 状态机 `new →(人审)→ confirmed/rejected`；报告与攻击建议只引用 confirmed；实体的"有待审/已确认/已驳回"是其观测的人审聚合，与生命周期互相独立（对应成熟产品的归属态/人审态分离）
@@ -59,7 +59,7 @@ PentSuite/
 | 归档 | `archive --project P` / `unarchive --project P`（面板下拉默认隐藏已归档项目，「含归档」开关可见；数据/证据全部保留可查；**真删除仍走 drop --confirm，仅限人显式指令**） |
 | 开面板（幂等托管） | `panel --project P`（活着复用/没起拉起/被占报 PID；输出 url+pending 数；**AI 会话内禁用本命令**——detached 子进程必死） |
 | 面板启停（AI 走这里） | skill 随行脚本 `skill/pentest-kb-workflow/scripts/panel.py start\|stop\|status`：start 须 `run_in_background=true` 后台跑（内部=端口检测+venv python 选择+PENTDB_DB 注入+socket 就绪验证+常驻托管，已运行幂等跳过）；stop=netstat(GBK) 查 PID+taskkill+socket 复验关闭。规范见 SKILL「面板生命周期」 |
-| 落资产 | `add --project P --kind domain\|port\|path\|param\|finding\|osint --value V --source "命令/URL" [--code][--tech][--service][--scope][--severity]` |
+| 落资产 | `add --project P --kind domain\|port\|path\|param\|finding\|osint --value V --source "命令/URL" [--code][--tech][--service][--scope][--severity]`；`--auto`（机器事实 kind）缺省自动 confirmed，推断类缺省 new 进待审 |
 | 重扫更新 | 同 kind+value 重复时 `add --update`：刷新观测字段并更新 last_seen（updated_at），状态与人审结论保留 |
 | 重建实体层 | `rebuild-assets --project P`（幂等；add/recon 资产类写入后自动触发，一般无需手跑） |
 | 登记测试 | `add --kind test --value "动作" --note "结论 ｜ 依据：输出关键证据" --parent-ext <id>[,id2] --source "命令" --auto --status confirmed --confidence high`（value=动作、note=「结论 ｜ 依据」两段式） |
@@ -74,8 +74,9 @@ PentSuite/
 | AI 推断 | `add ... --confidence high\|medium\|low`（推断类禁止 confirmed，一律 new 进待审） |
 | 查询 | `query --project P [--kind][--status]` |
 | SOP 提示 | `sop --project P`（扁平提示清单：when 触发语义 + check 提示术语 + 状态参考，AI 语义判断命中后对照自查；**提示层非门禁、非义务，不设豁免**，覆盖度由 AI 显式申报、人背书；无阶段概念） |
-| 豁免 | `waive --project P --id N --term T --reason R`（只作用于具体事件：报文豁免挂 finding、归因豁免挂 test；起草态不生效，人工 `waive --wid M --confirm` 确认后才生效，AI 不得代批） |
-| 门禁 | `lint --project P`（收尾 0 error；含对账：证据文件丢失=error、test 零证据输出/结论无机读词/结论缺判断依据/suggestion 缺【下一步】=warn、**执行流水对账：journal 探测类命令无对应 test 事件=error（测了没记），`--no-journal` 开发场景跳过**） |
+| 豁免 | `waive --project P --id N --term T --reason R`（只作用于具体事件：报文豁免挂 finding、归因豁免挂 test；起草态不生效，人工 `waive --wid M --confirm` 确认后生效、`--wid M --reject` 作废终结（留痕、阻断恢复），均 AI 不得代行；`--wid 34,35,36` 逗号分隔批量） |
+| 记录作废 | `void --project P --id N --reason R`（或 `--ids N,M,…` 批量；**人的决定**：冗余/误录数据清理通道，区别于豁免——作废记录退出 lint 阻断/报告/面板主视图/资产派生；`--undo` 恢复误作废；均留痕 actor=human） |
+| 门禁 | `lint --project P [--health]`（收尾 0 阻断；两分类：**阻断**=证据文件丢失/缺报文·取证/测试未归因/命令流水未落库/溯源缺失；**健康度**=格式类提示（零留痕/结论词/分节/计划三段式等）不阻断，CLI 缺省只报条数 `--health` 看明细，面板常驻；含执行流水对账：journal 探测类命令无对应 test 事件=阻断（测了没记），`--no-journal` 开发场景跳过） |
 | hook 部署 | `hook-install`（生成 PreToolUse journal hook；默认项目级仅本工作区生效，**`--global` 写用户级全工作区生效——渗透发生在目标工作目录，推荐**；CLI 终端版需 `/hooks` 面板审查，桌面版实测动态加载即生效，验证=新会话跑命令查 journal） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单+**复测计划（最新 suggestion）**；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |

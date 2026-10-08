@@ -42,7 +42,8 @@ def _parse_finding_detail(detail):
 
 
 def _pentest_report(c, project):
-    rows = c.execute("SELECT * FROM raw_events WHERE project=? ORDER BY id", (project,)).fetchall()
+    rows = c.execute("SELECT * FROM raw_events WHERE project=? AND voided=0 ORDER BY id",
+                     (project,)).fetchall()
     findings = [r for r in rows if r["kind"] == "finding" and r["status"] == "confirmed"]
     pending = [r for r in rows if r["status"] == "new"]
     domains_in = [r["value"] for r in rows if r["kind"] == "domain" and r["scope"] == "in"]
@@ -86,7 +87,7 @@ def _pentest_report(c, project):
                 out.append(f"- `{e['path']}`（sha256={e['sha256'][:16]}…）")
     sug = c.execute(
         "SELECT id, title, detail, created_at FROM raw_events "
-        "WHERE project=? AND kind='suggestion' ORDER BY id DESC LIMIT 1",
+        "WHERE project=? AND kind='suggestion' AND voided=0 ORDER BY id DESC LIMIT 1",
         (project,)).fetchone()
     if sug:
         out += ["", "## 4 复测计划（最新批次收尾）",
@@ -122,7 +123,7 @@ def sop_report(c, project):
     真实覆盖度由 AI 显式申报、人背书，不做机器判定，也不写库（纯只读）。"""
     menu = _hints_menu(load_sop_cfg())
     tests = [dict(r) for r in c.execute(
-        "SELECT * FROM raw_events WHERE project=? AND kind='test'", (project,))]
+        "SELECT * FROM raw_events WHERE project=? AND kind='test' AND voided=0", (project,))]
     test_texts = {t["id"]: (t["value"] or "") + " " + (t["note"] or "") + " " + (t["source"] or "")
                   for t in tests}
 

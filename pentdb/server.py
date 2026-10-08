@@ -106,7 +106,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"by_kind": by_kind, "by_status": by_status, "domains": domains})
             elif u.path == "/api/events":
                 p = q.get("project", [""])[0]
-                sql = "SELECT * FROM raw_events WHERE project=?"
+                sql = "SELECT * FROM raw_events WHERE project=? AND voided=0"
                 args = [p]
                 if q.get("kind"):
                     sql += " AND kind=?"; args.append(q["kind"][0])
@@ -294,7 +294,30 @@ class Handler(BaseHTTPRequestHandler):
                 p = q.get("project", [""])[0]
                 rows = rows_to_dicts(c.execute(
                     "SELECT * FROM raw_events WHERE project=? AND kind IN ('finding','osint') "
-                    "ORDER BY id DESC", (p,)))
+                    "AND voided=0 ORDER BY id DESC", (p,)))
+                # 豁免决定跟随记录上下文（对齐成熟产品：门禁页只读）：
+                # 把该记录的起草态豁免带出来，发现页行内即可确认/作废；
+                # no_pkt/no_ev 与 lint F-301/O-301 同口径（finding 需 req+resp 成对，osint 任一证据）
+                wvs = rows_to_dicts(c.execute(
+                    "SELECT id, event_id, term, reason FROM waives "
+                    "WHERE project=? AND confirmed=0", (p,)))
+                wv_map = {}
+                for w in wvs:
+                    wv_map.setdefault(str(w["event_id"]), w)
+                ev_req = {r["event_id"] for r in c.execute(
+                    "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'request%'", (p,))}
+                ev_resp = {r["event_id"] for r in c.execute(
+                    "SELECT event_id FROM evidence WHERE project=? AND note LIKE 'response%'", (p,))}
+                ev_any = {r["event_id"] for r in c.execute(
+                    "SELECT DISTINCT event_id FROM evidence WHERE project=? AND event_id != 0", (p,))}
+                for r in rows:
+                    w = wv_map.get(str(r["id"]))
+                    if w:
+                        r["wv"] = w
+                    if r["kind"] == "finding":
+                        r["no_pkt"] = (r["id"] not in ev_req) or (r["id"] not in ev_resp)
+                    elif r["kind"] == "osint":
+                        r["no_ev"] = r["id"] not in ev_any
                 self._json({"findings": rows})
             elif u.path == "/api/probes":
                 # probe 观测查询（只读）：host 参数支持精确与子域聚合（domain 节点查其下全部 host）
@@ -317,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
                 p = q.get("project", [""])[0]
                 rows = rows_to_dicts(c.execute(
                     "SELECT * FROM raw_events WHERE project=? AND kind='suggestion' "
-                    "ORDER BY id DESC LIMIT 30", (p,)))
+                    "AND voided=0 ORDER BY id DESC LIMIT 30", (p,)))
                 self._json({"suggestions": rows})
             elif u.path == "/api/lint":
                 p = q.get("project", [""])[0]
@@ -338,7 +361,8 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/pending":
                 p = q.get("project", [""])[0]
                 rows = rows_to_dicts(c.execute(
-                    "SELECT * FROM raw_events WHERE project=? AND status='new' ORDER BY id", (p,)))
+                    "SELECT * FROM raw_events WHERE project=? AND status='new' AND voided=0 "
+                    "ORDER BY id", (p,)))
                 # 去重前置：同值已有 confirmed/rejected 的条目在队列里直接打标（成熟 inbox 模式）
                 vals = sorted({r["value"] for r in rows if r["value"]})
                 stat = {}
@@ -363,8 +387,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:  # journal/lint 对账读盘异常：返回 500 JSON，不打断连接
                     return self._json({"error": "lint 对账失败：" + str(e)}, 500)
                 if rep["errors"] and q.get("force", ["0"])[0] != "1":
-                    self._json({"error": f"lint 有 {len(rep['errors'])} error，拒绝出报告——"
-                                         "先修复或经人工确认豁免（带错出报告需人工加 force=1）",
+                    self._json({"error": f"报告出口门禁：{len(rep['errors'])} 项阻断——"
+                                         "逐条修复或人工确认豁免（带错出报告需人工加 force=1）",
                                 "lint": rep}, 409)
                     return
                 if template == "pentest":
@@ -463,31 +487,96 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "id": row["id"] if row else None})
             finally:
                 c2.close()
-        if u.path == "/api/waive/confirm":
-            # 豁免确认（人的决定，对齐 CLI waive --wid N --confirm）：面板点击=人工确认，actor=human 留痕
+        if u.path in ("/api/waive/confirm", "/api/waive/reject"):
+            # 豁免确认/作废（人的决定，对齐 CLI waive --wid N --confirm/--reject）：
+            # 面板点击=人工操作，actor=human 留痕；wid 支持单值或 wids 数组批量
             n = int(self.headers.get("Content-Length", 0))
             data = json.loads(self.rfile.read(n).decode("utf-8"))
             project = (data.get("project") or "").strip()
-            wid = data.get("wid")
-            if not project or not wid:
+            wids = data.get("wids") or ([data.get("wid")] if data.get("wid") else [])
+            try:
+                wids = [int(w) for w in wids]
+            except (TypeError, ValueError):
+                return self._json({"error": "bad wid"}, 400)
+            if not project or not wids:
                 return self._json({"error": "project/wid 必填"}, 400)
+            confirm_act = u.path.endswith("/confirm")
             c0 = db()
             try:
-                row = c0.execute("SELECT id, event_id, term, reason, confirmed FROM waives "
-                                 "WHERE id=? AND project=?", (wid, project)).fetchone()
-                if not row:
-                    return self._json({"error": f"豁免记录不存在: wid={wid}"}, 404)
-                if not row["confirmed"]:
-                    from pdb_findings import log_change
-                    c0.execute("UPDATE waives SET confirmed=1 WHERE id=?", (wid,))
-                    log_change(c0, project, "waive-confirm",
-                               f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}（面板确认）",
-                               actor="human")
-                    c0.commit()
-                return self._json({"ok": True, "wid": wid,
-                                   "already": bool(row["confirmed"])})
+                from pdb_findings import log_change
+                done, skipped = [], []
+                for wid in wids:
+                    row = c0.execute("SELECT id, event_id, term, reason, confirmed FROM waives "
+                                     "WHERE id=? AND project=?", (wid, project)).fetchone()
+                    if not row:
+                        skipped.append({"wid": wid, "why": "不存在"})
+                        continue
+                    if confirm_act and row["confirmed"] == 2:
+                        return self._json({"error": f"wid={wid} 已作废，不能确认"}, 409)
+                    if (not confirm_act) and row["confirmed"] == 1:
+                        return self._json({"error": f"wid={wid} 已确认生效，不能作废"}, 409)
+                    newv = 1 if confirm_act else 2
+                    if row["confirmed"] != newv:
+                        c0.execute("UPDATE waives SET confirmed=? WHERE id=?", (newv, wid))
+                        log_change(c0, project,
+                                   "waive-confirm" if confirm_act else "waive-reject",
+                                   f"wid={wid} #{row['event_id']} {row['term']}: {row['reason']}"
+                                   f"（面板{'确认' if confirm_act else '作废'}）", actor="human")
+                        c0.commit()
+                    else:
+                        skipped.append({"wid": wid, "why": "已是目标态"})
+                return self._json({"ok": True, "done": done or [w for w in wids],
+                                   "skipped": skipped})
             finally:
                 c0.close()
+        if u.path == "/api/waive/draft":
+            # 豁免起草（AI/面板均可起草，确认生效仍需人在发现页或 CLI --confirm）：
+            # 复用 cmd_waive 同一实现——校验记录归属、强制 term/reason、留痕（起草，待人工确认）
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            project = (data.get("project") or "").strip()
+            eid = data.get("id")
+            term = (data.get("term") or "").strip()
+            reason = (data.get("reason") or "").strip()
+            if not project or eid is None or not term or not reason:
+                return self._json({"error": "project/id/term/reason 必填"}, 400)
+            import argparse as _ap
+            import pentdb
+            try:
+                pentdb.cmd_waive(_ap.Namespace(project=project, id=int(eid), wid=0,
+                                               term=term, reason=reason,
+                                               confirm=False, reject=False))
+            except SystemExit as e:
+                return self._json({"error": str(e).strip() or "起草失败"}, 400)
+            c3 = db()
+            try:
+                row = c3.execute("SELECT id FROM waives WHERE project=? AND event_id=? AND term=? "
+                                 "ORDER BY id DESC LIMIT 1", (project, int(eid), term)).fetchone()
+                return self._json({"ok": True, "wid": row["id"] if row else None})
+            finally:
+                c3.close()
+        if u.path == "/api/void":
+            # 记录作废/恢复（人的决定，对齐 CLI void）：冗余/误录数据清理通道，
+            # 作废记录退出 lint 阻断/报告/面板主视图；复用 cmd_void 同一实现留痕 actor=human
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            project = (data.get("project") or "").strip()
+            ids = data.get("ids") or []
+            reason = (data.get("reason") or "").strip()
+            undo = bool(data.get("undo"))
+            if not project or not ids:
+                return self._json({"error": "project/ids 必填"}, 400)
+            if not undo and not reason:
+                return self._json({"error": "作废必须写明 reason（留痕可追溯）"}, 400)
+            import argparse as _ap
+            import pentdb
+            try:
+                pentdb.cmd_void(_ap.Namespace(project=project, id=0,
+                                              ids=",".join(str(int(i)) for i in ids),
+                                              reason=reason, undo=undo))
+            except SystemExit as e:
+                return self._json({"error": str(e).strip() or "void 失败"}, 400)
+            return self._json({"ok": True})
         if u.path != "/api/review":
             return self._json({"error": "not found"}, 404)
         n = int(self.headers.get("Content-Length", 0))
