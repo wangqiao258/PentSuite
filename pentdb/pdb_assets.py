@@ -124,7 +124,7 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
         dup = c.execute("SELECT * FROM raw_events WHERE project=? AND kind=? AND value=? AND voided=0 ORDER BY id LIMIT 1",
                         (a.project, a.kind, a.value)).fetchone()
         if dup:
-            if not a.update:
+            if not getattr(a, "update", False):
                 sys.exit(f"[x] 重复记录：{a.kind}:{a.value} 已存在 #{dup['id']}，"
                          f"引用该 id，或加 --update 走重扫更新（刷新观测字段，保留状态与人审结论）")
             changes = []
@@ -144,14 +144,25 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
             old_scope = dup["scope"] or "unknown"
             if a.scope and a.scope != old_scope:
                 changes.append(f"scope {old_scope} -> {a.scope}")
+            # 探索血缘：重扫时允许补挂/修正意图归属（显式传入才生效，缺省 0=保留原值）
+            new_intent = getattr(a, "intent_id", 0) or 0
+            if new_intent and new_intent != (dup["intent_id"] or 0):
+                irow = c.execute("SELECT id, status FROM intents WHERE id=? AND project=?",
+                                 (new_intent, a.project)).fetchone()
+                if not irow:
+                    sys.exit(f"[x] 探索意图不存在: #{new_intent}（先 intent add，注意 --project 一致）")
+                if irow["status"] != "active":
+                    sys.exit(f"[x] 探索意图 #{new_intent} 已关闭（{irow['status']}）：关闭后不再接受挂接")
+                changes.append(f"intent #{dup['intent_id'] or 0} -> #{new_intent}")
             c.execute("UPDATE raw_events SET note=?, detail=?, code=?, tech=?, service=?, title=?, scope=?, source=?, "
-                      "dedup_key=?, verified_at=?, updated_at=? WHERE id=?",
+                      "dedup_key=?, verified_at=?, updated_at=?, intent_id=? WHERE id=?",
                       (a.note or "", a.detail if a.detail is not None else dup["detail"],
                        str(a.code or ""), a.tech or "", a.service or "",
                        a.title if (a.title or "") else (dup["title"] or ""),
                        a.scope or old_scope,
                        a.source, dedup_key_for(a.value, a.title or dup["title"]),
-                       now(), now(), dup["id"]))
+                       now(), now(),
+                       new_intent if new_intent else (dup["intent_id"] or 0), dup["id"]))
             summary = "; ".join(changes) if changes else "观测未变，仅刷新验证时间与来源"
             log_change(c, a.project, "rescan-update", f"#{dup['id']} {a.kind}:{a.value[:50]} | {summary}")
             c.commit()
@@ -208,15 +219,25 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
     merge_key = a.merge_key or (a.value if a.kind == "domain" else "")
     verified = now() if status == "confirmed" else ""
     ts = now()
+    # 探索血缘校验：--intent 挂到进行中的意图（血缘链方向→观测；关闭后的意图拒绝新挂接）
+    intent_id = getattr(a, "intent_id", 0) or 0
+    if intent_id:
+        irow = c.execute("SELECT id, status FROM intents WHERE id=? AND project=?",
+                         (intent_id, a.project)).fetchone()
+        if not irow:
+            sys.exit(f"[x] 探索意图不存在: #{intent_id}（先 intent add 创建，注意 --project 一致）")
+        if irow["status"] != "active":
+            sys.exit(f"[x] 探索意图 #{intent_id} 已关闭（{irow['status']}）：关闭后不再接受新挂接")
     cur = c.execute(
         "INSERT INTO raw_events(project,ext_id,kind,value,title,detail,note,parent_ext,"
-        "merge_key,status,confidence,severity,code,tech,service,scope,dedup_key,verified_at,source,origin,created_at,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "merge_key,status,confidence,severity,code,tech,service,scope,dedup_key,verified_at,source,origin,intent_id,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (a.project, a.ext_id, a.kind, a.value, a.title or "", a.detail or "",
          a.note or "", a.parent_ext or "", merge_key, status, a.confidence or "",
          a.severity or "", str(a.code or ""), a.tech or "", a.service or "",
-         a.scope or "unknown", dedup, verified, a.source, a.origin, ts, ts))
-    log_change(c, a.project, "add", f"#{cur.lastrowid} {a.kind}:{a.value[:60]}")
+         a.scope or "unknown", dedup, verified, a.source, a.origin, intent_id, ts, ts))
+    log_change(c, a.project, "add", f"#{cur.lastrowid} {a.kind}:{a.value[:60]}"
+               + (f" ｜ 意图 #{intent_id}" if intent_id else ""))
     c.commit()
     if a.kind == "test":
         # test 结论 → finding 生命周期自动联动（add 与 exec 两通道都经本写入口，天然全覆盖）。
@@ -784,7 +805,7 @@ def apply_review(c, eid, action, note="", reviewer="human"):
     actor 语义一致）：改状态 + reviews 追加留痕 + changelog 留痕（actor=reviewer）。
     事件不存在返回 None；已同值幂等跳过返回 "skip"（不重复写 reviews/changelog）；
     正常落库返回所属 project。不 commit——由调用方决定提交时机（面板批量=单事务原子提交）。"""
-    row = c.execute("SELECT project, status FROM raw_events WHERE id=?", (eid,)).fetchone()
+    row = c.execute("SELECT project, status, kind FROM raw_events WHERE id=?", (eid,)).fetchone()
     if not row:
         return None
     if row["status"] == action:
@@ -793,6 +814,16 @@ def apply_review(c, eid, action, note="", reviewer="human"):
     c.execute("INSERT INTO reviews(event_id, action, reviewer, note, at) VALUES(?,?,?,?,?)",
               (eid, action, reviewer, note or "", now()))
     log_change(c, row["project"], "review", f"#{eid} -> {action}", actor=reviewer or "human")
+    if action == "rejected":
+        # 人审驳回联动作废：终结挂在该事件上的豁免草稿（confirmed=0→2），
+        # 避免孤儿豁免继续占"豁免待确认"提示位。联动源=人对本事件的驳回决定，
+        # 留痕 actor=reviewer 并注明联动手法；已确认(1)的豁免不受影响（那是独立的人的决定）。
+        for w in c.execute("SELECT id, term, reason FROM waives WHERE event_id=? AND confirmed=0",
+                           (eid,)).fetchall():
+            c.execute("UPDATE waives SET confirmed=2 WHERE id=?", (w["id"],))
+            log_change(c, row["project"], "waive-reject",
+                       f"wid={w['id']} #{eid} {w['term']}: {w['reason']}（人审驳回联动作废）",
+                       actor=reviewer or "human")
     return row["project"]
 
 

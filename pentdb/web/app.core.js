@@ -129,6 +129,7 @@ function switchTab(v){
   document.querySelectorAll("main section").forEach(s=>s.classList.add("hidden"));
   $("#v-"+v).classList.remove("hidden");
   if(v==="report")loadLint(); // Lint 门禁迁报告·收尾页：进页即查，不再随 loadAll 每次全量跑
+  if(v==="explore")loadExplore(); // 探索·计划页：进页即拉（只读视图，写走 CLI）
 }
 function gotoAssets(kind,status,q){
   const MAP={domain:"domain",port:"service",path:"endpoint",param:"endpoint",

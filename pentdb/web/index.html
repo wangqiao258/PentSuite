@@ -21,6 +21,7 @@
   <button data-v="assets">资产明细</button>
   <button data-v="timeline">时间线</button>
   <button data-v="review">待审队列</button>
+  <button data-v="explore">探索·计划</button>
   <button data-v="report">报告·收尾</button>
 </div>
 <main>
@@ -111,6 +112,17 @@
     </div>
     <div class="panel"><h3>AI 推断与待确认项 —— 队列只做判定：按来源分组、组头可整组判定（批注必填留痕）；点行展开判据卡（备注全文 + 同值历史），报文/证据在详情页唯一渲染、判据卡内一键跳转；同值已有已确认的重复嫌疑自动置底折叠，建议驳回或合并</h3><table id="review-table"></table></div>
   </section>
+  <section id="v-explore" class="hidden">
+    <div class="panel">
+      <h3>探索意图（血缘链：一条意图=一条带假设的推进方向；观测经 CLI add/exec --intent N 挂接，方向→观测可回溯）
+        <button class="mini" onclick="loadExplore()">刷新</button></h3>
+      <div id="explore-intents" class="muted">加载中…</div>
+    </div>
+    <div class="panel">
+      <h3>共享计划（todolist：CLI plan add/next/done 维护；plan next 只放行前置已满足的步骤，串行链不错序）</h3>
+      <div id="explore-plan" class="muted">加载中…</div>
+    </div>
+  </section>
   <section id="v-report" class="hidden">
     <div class="panel">
       <h3>Lint 收尾门禁
@@ -139,6 +151,7 @@
 <script src="app.assets.js"></script>
 <script src="app.queue.js"></script>
 <script src="app.report.js"></script>
+<script src="app.explore.js"></script>
 
 </body>
 </html>

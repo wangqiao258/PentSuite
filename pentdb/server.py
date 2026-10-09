@@ -3,6 +3,7 @@
 """PentDB 人看面板（stdlib，零依赖）。端口 8766，避免与旧 assetdb 面板 8765 冲突。"""
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -17,6 +18,7 @@ STATIC = {
     "/app.assets.js": ("app.assets.js", "text/javascript; charset=utf-8"),
     "/app.queue.js": ("app.queue.js", "text/javascript; charset=utf-8"),
     "/app.report.js": ("app.report.js", "text/javascript; charset=utf-8"),
+    "/app.explore.js": ("app.explore.js", "text/javascript; charset=utf-8"),
 }
 
 
@@ -342,6 +344,22 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT * FROM raw_events WHERE project=? AND kind='suggestion' "
                     "AND voided=0 ORDER BY id DESC LIMIT 30", (p,)))
                 self._json({"suggestions": rows})
+            elif u.path == "/api/intents":
+                # 探索血缘（只读）：意图列表 + 每个意图挂接的观测数（写走 CLI intent 命令）
+                p = q.get("project", [""])[0]
+                rows = rows_to_dicts(c.execute(
+                    "SELECT * FROM intents WHERE project=? ORDER BY id", (p,)))
+                for r in rows:
+                    r["event_n"] = c.execute(
+                        "SELECT COUNT(*) n FROM raw_events WHERE intent_id=? AND voided=0",
+                        (r["id"],)).fetchone()["n"]
+                self._json({"intents": rows})
+            elif u.path == "/api/plan":
+                # 共享 todolist（只读）：全部步骤按 seq 排（写走 CLI plan 命令）
+                p = q.get("project", [""])[0]
+                rows = rows_to_dicts(c.execute(
+                    "SELECT * FROM plan_steps WHERE project=? ORDER BY seq", (p,)))
+                self._json({"steps": rows})
             elif u.path == "/api/lint":
                 p = q.get("project", [""])[0]
                 import pentdb
@@ -614,7 +632,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def run(port=8766):
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"PentDB panel: http://127.0.0.1:{port}/")
+    if sys.stdout:  # pythonw 静默启动时 stdout 为 None
+        print(f"PentDB panel: http://127.0.0.1:{port}/")
     srv.serve_forever()
 
 

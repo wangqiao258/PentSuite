@@ -234,7 +234,7 @@ def run_js(args):
                         source=f"JS 解析 {u}", parent_ext="", merge_key="",
                         status="new", confidence="medium", severity="high",
                         code="", tech="", service="", scope="in", auto=False,
-                        origin="agent", stage="",
+                        origin="agent", stage="", update=False,
                         req="", resp="",
                         waive_capture="JS 静态发现无报文，人工验证后按七段补 req/resp 或确认豁免")
                     try:

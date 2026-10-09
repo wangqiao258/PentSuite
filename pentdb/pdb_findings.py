@@ -284,7 +284,8 @@ def _exec_run(c, a):
         detail=detail, note=note, source=cmd_str,
         parent_ext=a.parent_ext, merge_key="", status="confirmed",
         confidence=a.confidence, severity=a.severity, code="", tech="", service="",
-        scope="in", auto=True, update=False, origin="agent")
+        scope="in", auto=True, update=False, origin="agent",
+        intent_id=getattr(a, "intent_id", 0) or 0)
     try:
         cmd_add(ns)
     except SystemExit as e:

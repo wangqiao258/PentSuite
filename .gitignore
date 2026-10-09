@@ -15,3 +15,7 @@ dist/
 # 工作区私有配置
 .workbuddy/
 .codebuddy/
+
+# 本机运行产物
+pentdb/logs/
+.playwright-cli/

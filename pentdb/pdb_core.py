@@ -125,6 +125,35 @@ CREATE TABLE IF NOT EXISTS assets (
   PRIMARY KEY (project, atype, akey)
 );
 
+-- 探索血缘层（v9/v10，借鉴 ARTEX 探索图+共享 todolist 的本地化落地）：
+-- intents 一条=一条带假设的推进方向，观测经 raw_events.intent_id 挂接成 方向→观测 血缘链；
+-- plan_steps 共享 todolist：串行攻击链按依赖逐步放行（plan next 只出前置已满足的步骤）
+CREATE TABLE IF NOT EXISTS intents (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project    TEXT NOT NULL,
+  parent_id  INTEGER DEFAULT 0,              -- 父意图 id（血缘链上游方向，0=根意图）
+  goal       TEXT NOT NULL,                  -- 推进方向一句话（具体到目标/动作）
+  hypothesis TEXT DEFAULT '',                -- 假设/依据（为什么值得测）
+  status     TEXT NOT NULL DEFAULT 'active', -- active 进行中 / done 有产出关闭 / dead 方向作废
+  note       TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  closed_at  TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_intents_project ON intents(project);
+CREATE TABLE IF NOT EXISTS plan_steps (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project    TEXT NOT NULL,
+  seq        INTEGER NOT NULL,               -- 派发顺序（追加式递增，list/next 按 seq 排）
+  title      TEXT NOT NULL,                  -- 本步做什么（具体到目标/命令/假设）
+  depends_on TEXT DEFAULT '',                -- 前置步骤 id（逗号分隔）
+  intent_id  INTEGER DEFAULT 0,              -- 归属探索意图（可空）
+  status     TEXT NOT NULL DEFAULT 'ready',  -- blocked 受阻 / ready 可执行 / doing 执行中 / done 完成 / skip 跳过
+  note       TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  closed_at  TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_plan_project ON plan_steps(project);
+
 -- P0 防绕过审计触发器（2026-10-02）：纪律从"CLI 自觉"下沉为"DB 强制"——
 -- 任何写路径（含手编 SQLite）都被数据库本身拒绝。唯一例外通道：
 -- cmd_drop（人工 --confirm 高危操作）先 DROP 再经 executescript(SCHEMA) 恢复。
@@ -246,7 +275,7 @@ def dedup_key_for(value, title):
 #   - sqlite connect() 禁裸 DML；
 #   - 迁移回填只能放在对应 ALTER 首次成功的分支内做，随即 commit 释放写锁；
 #   - 新增列一律追加迁移步并递增 SCHEMA_VERSION，不回改 SCHEMA 基线。
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 
 def _mig_v1_schema(c):
@@ -352,10 +381,57 @@ def _mig_v8_voided(c):
     c.commit()
 
 
+def _mig_v9_intents(c):
+    """v8→v9：探索血缘层——intents 意图表 + raw_events.intent_id 归属列。
+    一条 intent=一条带假设的推进方向（借鉴 ARTEX 探索图）：事实/漏洞经 intent_id
+    挂到意图，形成 方向→观测 血缘链。存量观测 intent_id 缺省 0（无归属），不回填。"""
+    c.executescript("""
+CREATE TABLE IF NOT EXISTS intents (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project    TEXT NOT NULL,
+  parent_id  INTEGER DEFAULT 0,
+  goal       TEXT NOT NULL,
+  hypothesis TEXT DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'active',
+  note       TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  closed_at  TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_intents_project ON intents(project);
+""")
+    try:
+        c.execute("ALTER TABLE raw_events ADD COLUMN intent_id INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # 列已存在（部分迁移过的副本库）：幂等跳过
+    c.commit()
+
+
+def _mig_v10_plan_steps(c):
+    """v9→v10：计划层——plan_steps 共享 todolist（借鉴 ARTEX planner 多轮共享清单）。
+    串行攻击链按依赖逐步放行：plan next 只出前置步骤已全部 done/skip 的 ready 步骤，
+    链路不错序、不重复。表在 v1 基线与 v9 已就绪的库上幂等 no-op。"""
+    c.executescript("""
+CREATE TABLE IF NOT EXISTS plan_steps (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project    TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  title      TEXT NOT NULL,
+  depends_on TEXT DEFAULT '',
+  intent_id  INTEGER DEFAULT 0,
+  status     TEXT NOT NULL DEFAULT 'ready',
+  note       TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  closed_at  TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_plan_project ON plan_steps(project);
+""")
+    c.commit()
+
+
 # 迁移步注册表：下标 i 的函数把 user_version i 推进到 i+1（与 SCHEMA_VERSION 同步维护）
 _MIGRATIONS = (_mig_v1_schema, _mig_v2_columns, _mig_v3_evidence_etype,
                _mig_v4_waives_confirmed, _mig_v5_changelog_actor, _mig_v6_dedup_key,
-               _mig_v7_waive_reject, _mig_v8_voided)
+               _mig_v7_waive_reject, _mig_v8_voided, _mig_v9_intents, _mig_v10_plan_steps)
 
 
 def _migrate(c):

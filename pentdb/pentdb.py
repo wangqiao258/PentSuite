@@ -57,6 +57,8 @@ from pdb_findings import (CONCLUSION_LIFECYCLE, LIFE_CODES, TEST_CONCLUSIONS,
                           exec_packets_for_asset, parse_exec_log_file,
                           parse_exec_packet, set_lifecycle,
                           sync_lifecycle_from_test)
+from pdb_intents import (VALID_INTENT_STATUS, VALID_PLAN_STATUS,
+                         cmd_intent, cmd_plan, intent_add, intent_close)
 from pdb_report import (FINDING_MARKS, STATE_ICON, VERIFY_FRAME, _hints_menu,
                         _parse_finding_detail, _pentest_report, _term_in,
                         cmd_sop, load_sop_cfg, sop_report)
@@ -67,6 +69,7 @@ from pdb_tooling import (_CREDS_OUT_KEYS, _bootstrap_creds, _bootstrap_deps,
 import pdb_assets
 import pdb_core
 import pdb_findings
+import pdb_intents
 import pdb_report
 import pdb_tooling
 
@@ -173,11 +176,18 @@ def lint_report(c, project, journal_check=True):
     waived_capture = {w["event_id"] for w in wrows
                       if ("抓包" in (w["term"] or "") or "取证" in (w["term"] or ""))
                       and w["confirmed"] == 1}
-    draft_waives = [w for w in wrows if w["confirmed"] == 0]
-    draft_by_event = {w["event_id"]: w["id"] for w in draft_waives}
     # 作废记录（voided=1）= 人裁决的无效数据：不进任何对账/阻断（区别于豁免）
     voided_ids = {r[0] for r in c.execute(
         "SELECT id FROM raw_events WHERE project=? AND voided=1", (project,))}
+    # 人审驳回（status='rejected'）的事件：其挂起的豁免草稿是历史孤儿
+    # （apply_review 联动作废修复前遗留），防御性不再计入"豁免待确认"
+    rejected_ids = {r[0] for r in c.execute(
+        "SELECT id FROM raw_events WHERE project=? AND status='rejected'", (project,))}
+    draft_waives = [w for w in wrows
+                    if w["confirmed"] == 0
+                    and w["event_id"] not in rejected_ids
+                    and w["event_id"] not in voided_ids]
+    draft_by_event = {w["event_id"]: w["id"] for w in draft_waives}
 
     def pe_waive(rid):
         # test 归因豁免：已有起草 → 指明 wid 待确认；没有 → 告知豁免通道
@@ -484,6 +494,8 @@ def main():
                     help="重扫更新：同 kind+value 已存在时刷新观测字段（note/code/tech/service/来源/验证时间），状态与人审结论保留")
     sp.add_argument("--no-dedupe", dest="no_dedupe", action="store_true",
                     help="同指纹 finding 强制独立成条（默认写入即并入主条目：有报文转挂 evidence，无报文拒写）")
+    sp.add_argument("--intent", dest="intent_id", type=int, default=0,
+                    help="挂到探索意图 id（intent add 创建）：形成 方向→观测 血缘链；已关闭的意图拒绝挂接")
     sp.add_argument("--origin", default="agent", choices=VALID_ORIGIN)
     sp.set_defaults(fn=cmd_add)
 
@@ -505,6 +517,8 @@ def main():
                     help="执行后从输出解析逐路径探测结果并批量入库 kind=probe（需 --probe-host 提供缺省 host）")
     sp.add_argument("--probe-host", dest="probe_host", default="",
                     help="--probe-parse 的缺省 host（输出行只有相对路径时必填；行内含完整 URL 则可省）")
+    sp.add_argument("--intent", dest="intent_id", type=int, default=0,
+                    help="test 事件挂到探索意图 id（intent add 创建；血缘链归属）")
     sp.set_defaults(fn=cmd_exec)
 
     sp = sub.add_parser("probe-import", help="扫描结果批量入库为 probe 观测（Burp 式全录：JSON 或 log 文本，不参与资产归并）")
@@ -624,6 +638,71 @@ def main():
     sp.add_argument("--code", required=True, choices=LIFE_CODES)
     sp.add_argument("--note", default="", help="结论说明（进 changelog）")
     sp.set_defaults(fn=cmd_lifecycle)
+
+    # ---- intent：探索意图（血缘链；借鉴 ARTEX 探索图，方向→观测可回溯） ----
+    sp = sub.add_parser("intent", help="探索意图：一条 intent=一条带假设的推进方向；"
+                                       "观测经 add/exec --intent N 挂接成血缘链")
+    isub = sp.add_subparsers(dest="intent_cmd", required=True)
+
+    s = isub.add_parser("add", help="新建意图（status=active）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--goal", required=True, help="推进方向一句话（如：验证后台是否存在默认口令）")
+    s.add_argument("--hypothesis", default="", help="假设/依据（为什么值得测）")
+    s.add_argument("--parent", type=int, default=0, help="父意图 id（血缘链上游方向，0=根）")
+    s.set_defaults(intent_cmd="add")
+
+    s = isub.add_parser("list", help="列意图（缺省只看进行中，--all 含已关闭）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--all", dest="all_", action="store_true")
+    s.set_defaults(intent_cmd="list")
+
+    s = isub.add_parser("show", help="意图详情：血缘父链 + 挂接的全部观测")
+    s.add_argument("--project", required=True)
+    s.add_argument("--id", type=int, required=True)
+    s.set_defaults(intent_cmd="show")
+
+    s = isub.add_parser("close", help="关闭意图（done=有产出/验证完成；dead=方向作废）；关闭后拒绝新挂接")
+    s.add_argument("--project", required=True)
+    s.add_argument("--id", type=int, required=True)
+    s.add_argument("--status", required=True, choices=("done", "dead"))
+    s.add_argument("--note", default="")
+    s.set_defaults(intent_cmd="close")
+    sp.set_defaults(fn=cmd_intent)
+
+    # ---- plan：共享 todolist（借鉴 ARTEX planner 多轮共享清单，串行链按依赖逐步放行） ----
+    sp = sub.add_parser("plan", help="共享 todolist：plan next 只出前置已满足的步骤，"
+                                     "串行攻击链不错序、不重复（AI 粗筛循环的领取通道）")
+    psub = sp.add_subparsers(dest="plan_cmd", required=True)
+
+    s = psub.add_parser("add", help="追加步骤（有未满足前置 → blocked，否则 ready）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--title", required=True, help="本步做什么（具体到目标/命令/假设）")
+    s.add_argument("--depends", default="", help="前置步骤 id（逗号分隔，如 --depends 3,4）")
+    s.add_argument("--intent", dest="intent_id", type=int, default=0, help="归属探索意图 id（可空）")
+    s.add_argument("--note", default="")
+    s.set_defaults(plan_cmd="add")
+
+    s = psub.add_parser("next", help="领取下一步：自动晋升依赖已满足的 blocked 步骤，列出全部可执行项")
+    s.add_argument("--project", required=True)
+    s.set_defaults(plan_cmd="next")
+
+    s = psub.add_parser("done", help="完成步骤（写回后自动解锁依赖它的下一步）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--id", type=int, required=True)
+    s.add_argument("--note", default="", help="收尾说明（留痕）")
+    s.set_defaults(plan_cmd="done")
+
+    s = psub.add_parser("skip", help="跳过步骤（同样视为依赖已满足，解锁下游）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--id", type=int, required=True)
+    s.add_argument("--note", default="", help="跳过原因（留痕）")
+    s.set_defaults(plan_cmd="skip")
+
+    s = psub.add_parser("list", help="列未完成步骤（--all 含 done/skip）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--all", dest="all_", action="store_true")
+    s.set_defaults(plan_cmd="list")
+    sp.set_defaults(fn=cmd_plan)
 
     sp = sub.add_parser("recon")
     sp.add_argument("--project", required=True)

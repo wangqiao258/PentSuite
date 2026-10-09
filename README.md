@@ -50,6 +50,7 @@ PentSuite/
 - finding detail 七段约定：`【描述】【请求】【payload】【判据】【原因】【手工验证】【修复】`——【请求】是**测试用例（构造物）**，未实测须标"待验证"；**事实数据包 = evidence 的 request/response 对**（`add --kind finding --req/--resp` **写入口强制**，无报文直接拒绝；豁免走 `--waive-capture` 起草 + 人工 `waive --wid N --confirm` 确认；lint 兜底：漏洞无 req/resp 证据=error）。【判据】=基线 vs 复现的判定标准。test 事件 **value=动作、note=结论**，结论后用「｜ 依据：<输出关键证据>」补判断依据（两段式；机读结论但缺依据=lint warn——决策链在面板可复核）。批次收尾计划走 `--kind suggestion`：detail 按【已做】/【结论】/【下一步】三段（缺【下一步】=lint warn），报告「复测计划」节自动引用最新一条
 - 物料归属三层：**项目级**（凭据表/报告/访问说明，`evidence --event-id 0`）｜**finding 级**（该漏洞自己的 req/resp 证据）｜**实体级**（资产实体层聚合观测）。归属判定=复测时必须用到；认证依赖禁止虚构
 - `evidence`：证据随库走——文件默认复制进 `data/evidence/<project>/`（--keep-in-place 只存指针；`--text` 直存请求/响应原文），库内存路径+SHA256+**etype**（request/response/file，按 note 前缀自动落，面板按类型渲染）；详情页可查看，报告自动附证据清单
+- `intents` / `plan_steps`（v9/v10 探索血缘层，借鉴 ARTEX 双图+共享 todolist 的本地化落地）：`intents` 一条=一条带假设的推进方向（goal+hypothesis，parent_id 连父链，status: active/done/dead），观测经 `raw_events.intent_id` 挂接成方向→观测血缘链（挂接校验：意图须同项目且未关闭）；`plan_steps` 共享 todolist（seq 顺序、depends_on 前置、status: blocked/ready/doing/done/skip），`plan next` 只放行前置已满足的步骤（自动晋升留痕）——串行攻击链在"每轮全新会话"下仍稳定推进。两表为普通可变状态表（不受 append-only 触发器约束），全部状态推进走 CLI 留痕 changelog
 
 ## 命令速查（CLI = `python pentdb/pentdb.py`）
 
@@ -58,7 +59,7 @@ PentSuite/
 | 建档 | `init --project P` |
 | 归档 | `archive --project P` / `unarchive --project P`（面板下拉默认隐藏已归档项目，「含归档」开关可见；数据/证据全部保留可查；**真删除仍走 drop --confirm，仅限人显式指令**） |
 | 开面板（幂等托管） | `panel --project P`（活着复用/没起拉起/被占报 PID；输出 url+pending 数；**AI 会话内禁用本命令**——detached 子进程必死） |
-| 面板启停（AI 走这里） | skill 随行脚本 `skill/pentest-kb-workflow/scripts/panel.py start\|stop\|status`：start 须 `run_in_background=true` 后台跑（内部=端口检测+venv python 选择+PENTDB_DB 注入+socket 就绪验证+常驻托管，已运行幂等跳过）；stop=netstat(GBK) 查 PID+taskkill+socket 复验关闭。规范见 SKILL「面板生命周期」 |
+| 面板启停（AI 走这里） | skill 随行脚本 `skill/pentest-kb-workflow/scripts/panel.py start\|stop\|status`：start 须 `run_in_background=true` 后台跑（内部=端口预检+explorer 代理经 panel_start.bat 静默拉起 pythonw server.py，脱离会话进程树、跨会话常驻，会话结束不回收；explorer 不可用自动退回宿主托管并在输出标注；已运行幂等跳过）；**只拉不停**——AI 任务收尾不停面板，stop 仅限人工排障/重启前使用（netstat(GBK) 查 PID+taskkill+socket 复验关闭）。规范见 SKILL「面板生命周期」 |
 | 落资产 | `add --project P --kind domain\|port\|path\|param\|finding\|osint --value V --source "命令/URL" [--code][--tech][--service][--scope][--severity]`；`--auto`（机器事实 kind）缺省自动 confirmed，推断类缺省 new 进待审 |
 | 重扫更新 | 同 kind+value 重复时 `add --update`：刷新观测字段并更新 last_seen（updated_at），状态与人审结论保留 |
 | 重建实体层 | `rebuild-assets --project P`（幂等；add/recon 资产类写入后自动触发，一般无需手跑） |
@@ -79,13 +80,15 @@ PentSuite/
 | 门禁 | `lint --project P [--health]`（收尾 0 阻断；两分类：**阻断**=证据文件丢失/缺报文·取证/测试未归因/命令流水未落库/溯源缺失；**健康度**=格式类提示（零留痕/结论词/分节/计划三段式等）不阻断，CLI 缺省只报条数 `--health` 看明细，面板常驻；含执行流水对账：journal 探测类命令无对应 test 事件=阻断（测了没记），`--no-journal` 开发场景跳过） |
 | hook 部署 | `hook-install`（生成 PreToolUse journal hook；默认项目级仅本工作区生效，**`--global` 写用户级全工作区生效——渗透发生在目标工作目录，推荐**；CLI 终端版需 `/hooks` 面板审查，桌面版实测动态加载即生效，验证=新会话跑命令查 journal） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
+| 探索意图（血缘） | `intent add --project P --goal '<方向>' [--hypothesis 假设][--parent 父意图id]`；观测落库带 `--intent N`（add/exec 均可）挂到意图 → 形成方向→观测血缘链（回答"这个方向为什么测、产出了什么"）；`intent list/show/close`（close --status done\|dead；**关闭后拒绝新挂接**；已关闭意图的重扫更新补挂也拒绝）。面板「探索·计划」页只读展示 |
+| 共享计划（todolist） | `plan add --project P --title '<本步做什么>' [--depends 前置id,前置id][--intent N]`（有未满足前置→blocked，否则 ready）；`plan next`（**只放行前置已全部 done/skip 的步骤**，blocked 步骤依赖满足时自动晋升 ready 留痕；AI 粗筛循环的领取通道）；`plan done/skip --id N [--note]`（写回后自动解锁下游）；`plan list [--all]`。串行攻击链（注入点→凭据→横向）按依赖逐步派发，不错序、不重复 |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单+**复测计划（最新 suggestion）**；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |
 | 采集 | `recon --project P --domain D [--single][--proxy]`；`js --project P` |
 | 经验库 | `kb search --keyword K`；`kb add --title T --from-file F`（一律 draft）；`kb find-similar`；`kb pending`；`kb approve --id N --confirm`（人的决定）；`kb update`（仅内容字段，状态翻转只走 approve/reject）；`kb get/list/deleted/...` |
 
-## 面板六视图（全交互联动）
+## 面板七视图（全交互联动）
 
-目标总览（卡片点击跳转筛选）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+复制为 curl）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜报告·收尾（assets/pentest 模板+lint 门禁+整库备份）。SOP 提示已退役为 AI-only（CLI `sop`），面板不再展示
+目标总览（卡片点击跳转筛选）｜发现·漏洞（级别过滤+状态筛选；详情=复测工作台：目标跳资产、复测包页签=事实报文成对查看器（request/response 页签切换+复制为 curl）+复测用例（【请求】/【payload】一键复制/复制为 curl）+概要七节、证据链页签只放附件物料（查看）、复测时间轴、登记本轮手工复测）｜资产明细（实体分列：domain/host/service/endpoint，属性芯片+首末见+生命周期，点行下钻原始观测，手动补录）｜时间线｜待审队列（按来源分组+多选批量）｜探索·计划（意图血缘链+共享 todolist 只读看板，写走 CLI intent/plan）｜报告·收尾（assets/pentest 模板+lint 门禁+整库备份）。SOP 提示已退役为 AI-only（CLI `sop`），面板不再展示
 
 AI 播报约定：**仅批次产生新待审项时**播报（链接+新增数+待审数+重点）；纯 --auto 批次不打扰。
 
