@@ -58,7 +58,8 @@ from pdb_findings import (CONCLUSION_LIFECYCLE, LIFE_CODES, TEST_CONCLUSIONS,
                           parse_exec_packet, set_lifecycle,
                           sync_lifecycle_from_test)
 from pdb_intents import (VALID_INTENT_STATUS, VALID_PLAN_STATUS,
-                         cmd_intent, cmd_plan, intent_add, intent_close)
+                         cmd_hint, cmd_intent, cmd_plan, hint_add, hint_absorb,
+                         intent_add, intent_close)
 from pdb_report import (FINDING_MARKS, STATE_ICON, VERIFY_FRAME, _hints_menu,
                         _parse_finding_detail, _pentest_report, _term_in,
                         cmd_sop, load_sop_cfg, sop_report)
@@ -280,6 +281,11 @@ def lint_report(c, project, journal_check=True):
             warn(code="S-503", rid=rid, what="批次计划缺【下一步】段",
                  why="计划是一等公民，缺段后面板与报告看不到后续安排",
                  fix="按【已做】/【结论】/【下一步】三段补全")
+        if r["kind"] == "note" and (r["value"] or "") == "plan-review" \
+                and (r["detail"] or "").strip() and "#" not in r["detail"]:
+            warn(code="R-501", rid=rid, what="复盘结论未引用证据",
+                 why="复盘是 Goal 判定与方向决策，必须落到具体观测 id 才可复核（complete 论证规范）",
+                 fix="add --update（同 kind+value）补【依据】段引用观测 id，或重新 plan review --note --refs 落库")
         # 人审驳回的 finding/osint 不进报告「发现」节：证据/内容类检查全部跳过
         # （有效性已由人裁决，报文门禁不该再逼豁免——对齐"降级登记"语义）
         rej = r["status"] == "rejected" and r["kind"] in ("finding", "osint")
@@ -301,7 +307,7 @@ def lint_report(c, project, journal_check=True):
         if r["kind"] == "finding" and not rej and not (r["parent_ext"] or "").strip():
             warn(code="F-503", rid=rid, what="漏洞未关联资产",
                  why="应归因到被测资产，目标上下文断裂",
-                 fix="update --id 本条 --parent-ext 资产id")
+                 fix="parent_ext 落库后不可改（无 update 通道）：驳回本条，重新 add 带 --parent-ext 资产id")
         # osint 对账：情报参考至少一份事实取证材料（与 finding 报文门禁同一套豁免/确认机制）
         if r["kind"] == "osint" and not rej and rid not in waived_capture and rid not in ev_any:
             err(code="O-301", rid=rid, what="情报无取证材料",
@@ -686,6 +692,13 @@ def main():
     s.add_argument("--project", required=True)
     s.set_defaults(plan_cmd="next")
 
+    s = psub.add_parser("review", help="Reason 式图级复盘：检查点比对触发判定+复盘包；"
+                                       "--note 落库结论（必须 --refs 引用观测 id，裸判断拒绝）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--note", default="", help="复盘结论（落库 kind=note value=plan-review；留空=只打印复盘包）")
+    s.add_argument("--refs", default="", help="结论依据的观测 id（逗号分隔，--note 时必填，如 --refs 123,124）")
+    s.set_defaults(plan_cmd="review")
+
     s = psub.add_parser("done", help="完成步骤（写回后自动解锁依赖它的下一步）")
     s.add_argument("--project", required=True)
     s.add_argument("--id", type=int, required=True)
@@ -703,6 +716,29 @@ def main():
     s.add_argument("--all", dest="all_", action="store_true")
     s.set_defaults(plan_cmd="list")
     sp.set_defaults(fn=cmd_plan)
+
+    # ---- hint：人工判断通道（借鉴 Cairn Hint 原语，随时注入、AI 在关键时机读取） ----
+    sp = sub.add_parser("hint", help="人工判断注入：一条 hint=一条线索/判断，AI 在 intent add/plan next/plan review 时读取；"
+                                     "吸收留痕关单（绑定意图的随 intent close 自动吸收）")
+    hsub = sp.add_subparsers(dest="hint_cmd", required=True)
+
+    s = hsub.add_parser("add", help="注入 hint（status=open）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--text", required=True, help="判断/线索一句话（如：admin 后台疑似默认口令，先查版本）")
+    s.add_argument("--intent", dest="intent_id", type=int, default=0, help="绑定探索意图 id（可空，0=项目级）")
+    s.set_defaults(hint_cmd="add")
+
+    s = hsub.add_parser("list", help="列未吸收 hints（--all 含已吸收）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--all", dest="all_", action="store_true")
+    s.set_defaults(hint_cmd="list")
+
+    s = hsub.add_parser("absorb", help="标记已吸收（留痕；绑定意图的 hints 随 intent close 自动吸收，此为手动通道）")
+    s.add_argument("--project", required=True)
+    s.add_argument("--ids", required=True, help="hint id（逗号分隔，如 --ids 1,2）")
+    s.add_argument("--note", default="", help="吸收说明（怎么用掉的，留痕）")
+    s.set_defaults(hint_cmd="absorb")
+    sp.set_defaults(fn=cmd_hint)
 
     sp = sub.add_parser("recon")
     sp.add_argument("--project", required=True)

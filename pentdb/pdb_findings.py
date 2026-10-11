@@ -235,7 +235,7 @@ def cmd_exec(a):
     """执行落库单通道（recon 模式的推广）：AI 的探测/测试命令一律经本命令执行——
     输出强制落盘 + test 事件自动入库 + 原始输出自动挂证据，杜绝"测了没记"。
     test 事件经 cmd_add 写入口落库，结论→lifecycle 自动联动随之继承（单通道，无需另行挂钩）。
-    用法：pentdb.py exec --project P --parent-ext N -- <命令...>（-- 后接实际命令，非交互）"""
+    用法：pentdb.py exec --project P --parent-ext N --cmd '<完整命令>'（--cmd 必填，命令串原样执行，非交互）"""
     if not (a.parent_ext or "").strip():
         sys.exit("[x] --parent-ext 必填：测试必须归因到被测对象 record id（多对象逗号分隔）")
     cmd_str = (a.cmd or "").strip()
@@ -287,12 +287,9 @@ def _exec_run(c, a):
         scope="in", auto=True, update=False, origin="agent",
         intent_id=getattr(a, "intent_id", 0) or 0)
     try:
-        cmd_add(ns)
+        eid = cmd_add(ns)  # 写入口返回真实事件 id（不再跨连接猜最后一行，杜绝并发挂错证据）
     except SystemExit as e:
         sys.exit(f"[x] exec 落库被拒: {e}")
-    row = c.execute("SELECT id FROM raw_events WHERE project=? AND kind='test' "
-                    "ORDER BY id DESC LIMIT 1", (a.project,)).fetchone()
-    eid = row["id"] if row else 0
     ev_id = attach_evidence(c, a.project, eid, path=out_path, note="output " + slug)
     c.commit()
     print(f"[exec] #{eid} exit={code} ｜ 输出已挂证据 #{ev_id} ｜ {out_path}")
@@ -712,7 +709,7 @@ def cmd_lifecycle(a):
 
 def cmd_drop(a):
     """删除整个项目及其数据（高危操作，必须 --confirm）。changelog 留墓碑记录。
-    级联清 assets/reviews——reviews 无 project 列，按被删事件的 id 集合清；
+    级联清 assets/intents/plan_steps/hints/reviews——reviews 无 project 列，按被删事件的 id 集合清；
     changelog 故意保留（墓碑留痕）。"""
     if not a.confirm:
         sys.exit("[x] 删除项目是高危操作，必须显式加 --confirm")
@@ -725,7 +722,8 @@ def cmd_drop(a):
         # 先短暂解除，删除完成后经 executescript(SCHEMA) 幂等恢复全部审计触发器
         for t in AUDIT_TRIGGERS:
             c.execute(f"DROP TRIGGER IF EXISTS {t}")
-        for t in ("raw_events", "assets", "pending_tests", "waives", "evidence"):
+        for t in ("raw_events", "assets", "pending_tests", "waives", "evidence",
+                  "intents", "plan_steps", "hints"):
             c.execute(f"DELETE FROM {t} WHERE project=?", (a.project,))
         if ev_ids:
             c.execute("DELETE FROM reviews WHERE event_id IN (%s)" %

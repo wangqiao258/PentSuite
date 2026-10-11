@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS projects (
   name       TEXT PRIMARY KEY,
   stages_enabled TEXT DEFAULT '',
   archived   INTEGER DEFAULT 0,
+  profile    TEXT DEFAULT '',          -- 项目画像（面板 /api/projects 直接 SELECT；空=服务端按 attack-surface 兜底）
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS raw_events (
@@ -90,7 +91,7 @@ CREATE TABLE IF NOT EXISTS waives (
   term       TEXT NOT NULL,
   reason     TEXT NOT NULL,
   at         TEXT NOT NULL,
-  confirmed  INTEGER DEFAULT 0                     -- 0=起草（AI 可起草不得自批）1=人工确认生效
+  confirmed  INTEGER DEFAULT 0                     -- 0=起草（AI 可起草不得自批）1=人工确认生效 2=人工作废（v7）
 );
 CREATE TABLE IF NOT EXISTS reviews (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,6 +154,20 @@ CREATE TABLE IF NOT EXISTS plan_steps (
   closed_at  TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_plan_project ON plan_steps(project);
+
+-- Hint 通道（v11，借鉴 Cairn Hint 原语）：人工判断随时注入，AI 在
+-- intent add / plan next / plan review 时读取；吸收（absorbed）全留痕——
+-- 绑定意图的 hint 随 intent close 自动吸收，全项目 hint 走 hint absorb 手动关单
+CREATE TABLE IF NOT EXISTS hints (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project     TEXT NOT NULL,
+  text        TEXT NOT NULL,                  -- 判断/线索一句话（如：admin 后台疑似默认口令，先查版本）
+  intent_id   INTEGER DEFAULT 0,              -- 绑定意图（0=项目级；绑定的意图关闭时自动吸收）
+  status      TEXT NOT NULL DEFAULT 'open',   -- open 待吸收 / absorbed 已吸收
+  created_at  TEXT NOT NULL,
+  absorbed_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_hints_project ON hints(project);
 
 -- P0 防绕过审计触发器（2026-10-02）：纪律从"CLI 自觉"下沉为"DB 强制"——
 -- 任何写路径（含手编 SQLite）都被数据库本身拒绝。唯一例外通道：
@@ -275,7 +290,7 @@ def dedup_key_for(value, title):
 #   - sqlite connect() 禁裸 DML；
 #   - 迁移回填只能放在对应 ALTER 首次成功的分支内做，随即 commit 释放写锁；
 #   - 新增列一律追加迁移步并递增 SCHEMA_VERSION，不回改 SCHEMA 基线。
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 
 
 def _mig_v1_schema(c):
@@ -428,10 +443,41 @@ CREATE INDEX IF NOT EXISTS idx_plan_project ON plan_steps(project);
     c.commit()
 
 
+def _mig_v11_hints(c):
+    """v10→v11：Hint 通道——hints 人工判断表（借鉴 Cairn Hint 原语）。
+    人工判断随时注入（open），AI 在 intent add / plan next / plan review 读取；
+    吸收转 absorbed 全留痕：绑定意图的随 intent close 自动吸收，项目级走 hint absorb。
+    表在 v1 基线（本版 SCHEMA）与历史库上均幂等。"""
+    c.executescript("""
+CREATE TABLE IF NOT EXISTS hints (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project     TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  intent_id   INTEGER DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'open',
+  created_at  TEXT NOT NULL,
+  absorbed_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_hints_project ON hints(project);
+""")
+    c.commit()
+
+
+def _mig_v12_projects_profile(c):
+    """v11→v12：projects.profile（项目画像；面板 /api/projects 直接 SELECT 该列，
+    空=服务端按 attack-surface 兜底）。纯加列无回填；列已存在（现网库历史外部加列）幂等跳过。"""
+    try:
+        c.execute("ALTER TABLE projects ADD COLUMN profile TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        return
+    c.commit()
+
+
 # 迁移步注册表：下标 i 的函数把 user_version i 推进到 i+1（与 SCHEMA_VERSION 同步维护）
 _MIGRATIONS = (_mig_v1_schema, _mig_v2_columns, _mig_v3_evidence_etype,
                _mig_v4_waives_confirmed, _mig_v5_changelog_actor, _mig_v6_dedup_key,
-               _mig_v7_waive_reject, _mig_v8_voided, _mig_v9_intents, _mig_v10_plan_steps)
+               _mig_v7_waive_reject, _mig_v8_voided, _mig_v9_intents, _mig_v10_plan_steps,
+               _mig_v11_hints, _mig_v12_projects_profile)
 
 
 def _migrate(c):

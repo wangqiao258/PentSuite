@@ -27,7 +27,7 @@ PentSuite/
 │  ├─ server.py + web/     零依赖面板（stdlib，端口 8766；六视图全交互联动）
 │  │                       web/ 七文件：index.html + style.css + 5 个 app.*.js（core/findings/assets/queue/report，按视图域拆分；boot() 在 app.report.js 尾部触发；server.py 白名单静态路由）
 │  ├─ sop/default.json     SOP 提示清单（扁平 hints：when 触发语义 + check 提示术语，AI 查漏补缺用，无阶段）
-│  ├─ tests/               12 个单测（stdlib unittest，unittest discover 全跑）：核心/资产/实体下钻/exec/报文解析/审计门禁/journal/probe/面板参数/审计触发器(guards)/决策链(plan)/sop 提示
+│  ├─ tests/               15 个单测（stdlib unittest，unittest discover 全跑）：核心/资产/实体下钻/exec/报文解析/审计门禁/journal/probe/面板参数/审计触发器(guards)/决策链(plan)/血缘意图(intents)/hint 通道/图级复盘(review)/sop 提示
 │  ├─ hooks/journal.py     PreToolUse hook：宿主命令流水落盘（hook-install 部署）
 │  ├─ kb/                  经验层单元（pentest-kb，Supabase 云端，强制脱敏）
 │  │  ├─ kb.py             经验库逻辑（CLI kb-* 子命令的实现）
@@ -81,7 +81,8 @@ PentSuite/
 | hook 部署 | `hook-install`（生成 PreToolUse journal hook；默认项目级仅本工作区生效，**`--global` 写用户级全工作区生效——渗透发生在目标工作目录，推荐**；CLI 终端版需 `/hooks` 面板审查，桌面版实测动态加载即生效，验证=新会话跑命令查 journal） |
 | 人审 | `review --project P --id N --confirm\|--reject`（面板支持按来源分组多选批量，批量强制批注） |
 | 探索意图（血缘） | `intent add --project P --goal '<方向>' [--hypothesis 假设][--parent 父意图id]`；观测落库带 `--intent N`（add/exec 均可）挂到意图 → 形成方向→观测血缘链（回答"这个方向为什么测、产出了什么"）；`intent list/show/close`（close --status done\|dead；**关闭后拒绝新挂接**；已关闭意图的重扫更新补挂也拒绝）。面板「探索·计划」页只读展示 |
-| 共享计划（todolist） | `plan add --project P --title '<本步做什么>' [--depends 前置id,前置id][--intent N]`（有未满足前置→blocked，否则 ready）；`plan next`（**只放行前置已全部 done/skip 的步骤**，blocked 步骤依赖满足时自动晋升 ready 留痕；AI 粗筛循环的领取通道）；`plan done/skip --id N [--note]`（写回后自动解锁下游）；`plan list [--all]`。串行攻击链（注入点→凭据→横向）按依赖逐步派发，不错序、不重复 |
+| 共享计划（todolist） | `plan add --project P --title '<本步做什么>' [--depends 前置id,前置id][--intent N]`（有未满足前置→blocked，否则 ready）；`plan next`（**只放行前置已全部 done/skip 的步骤**，blocked 步骤依赖满足时自动晋升 ready 留痕；同时输出未吸收 hints；AI 粗筛循环的领取通道）；`plan done/skip --id N [--note]`（写回后自动解锁下游）；`plan list [--all]`；`plan review [--note '<结论>' --refs 观测id,观测id]`（**图级 Reason 式复盘**：检查点比对 events/hints/open_intents 增量→触发判定+意图全景复盘包；落库结论**必须 --refs 引用观测 id**，裸判断拒绝——complete 论证规范；检查点写入 changelog 作下次比对基准，图更新即复盘非定时）。串行攻击链（注入点→凭据→横向）按依赖逐步派发，不错序、不重复 |
+| 人工判断（hint） | `hint add --project P --text '<判断/线索>' [--intent N]`（借鉴 Cairn Hint 原语：人工判断随时注入；AI 在 intent add/plan next/plan review 时读取）；`hint list [--all]`；`hint absorb --ids 1,2 [--note 用途]`（吸收留痕关单；**绑定意图的 hints 随 intent close 自动吸收**）。schema v11 |
 | 报告 | `report --project P [--template pentest] [--out F]`（pentest=描述/复现包/原因/手工验证/修复+证据清单+**复测计划（最新 suggestion）**；**出口门禁：lint 有 error 拒绝出报告**，`--force` 仅限人工解除） |
 | 采集 | `recon --project P --domain D [--single][--proxy]`；`js --project P` |
 | 经验库 | `kb search --keyword K`；`kb add --title T --from-file F`（一律 draft）；`kb find-similar`；`kb pending`；`kb approve --id N --confirm`（人的决定）；`kb update`（仅内容字段，状态翻转只走 approve/reject）；`kb get/list/deleted/...` |

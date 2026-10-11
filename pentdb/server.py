@@ -466,16 +466,10 @@ class Handler(BaseHTTPRequestHandler):
                 severity="", code="", tech="", service="", scope="in",
                 auto=True, update=False, origin="human")
             try:
-                pentdb.cmd_add(ns)
+                new_id = pentdb.cmd_add(ns)  # 写入口返回真实事件 id（不再跨连接猜最后一行）
             except SystemExit as e:
                 return self._json({"error": str(e)}, 400)
-            c2 = db()
-            try:
-                r2 = c2.execute("SELECT id FROM raw_events WHERE project=? AND kind='test' "
-                                "ORDER BY id DESC LIMIT 1", (row["project"],)).fetchone()
-                return self._json({"ok": True, "id": r2["id"] if r2 else None})
-            finally:
-                c2.close()
+            return self._json({"ok": True, "id": new_id})
         if u.path == "/api/manual-add":
             n = int(self.headers.get("Content-Length", 0))
             data = json.loads(self.rfile.read(n).decode("utf-8"))
@@ -494,17 +488,10 @@ class Handler(BaseHTTPRequestHandler):
                 severity=severity, code="", tech="", service="", scope=scope,
                 auto=False, update=bool(data.get("update")), origin="human")
             try:
-                pentdb.cmd_add(ns)
+                new_id = pentdb.cmd_add(ns)  # 写入口返回真实事件 id（不再跨连接猜最后一行）
             except SystemExit as e:
                 return self._json({"error": str(e)}, 400)
-            c2 = db()
-            try:
-                row = c2.execute(
-                    "SELECT id FROM raw_events WHERE project=? AND kind=? AND value=? "
-                    "ORDER BY id DESC LIMIT 1", (data.get("project"), kind, value)).fetchone()
-                return self._json({"ok": True, "id": row["id"] if row else None})
-            finally:
-                c2.close()
+            return self._json({"ok": True, "id": new_id})
         if u.path in ("/api/waive/confirm", "/api/waive/reject"):
             # 豁免确认/作废（人的决定，对齐 CLI waive --wid N --confirm/--reject）：
             # 面板点击=人工操作，actor=human 留痕；wid 支持单值或 wids 数组批量

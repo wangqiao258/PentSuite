@@ -64,6 +64,8 @@ def cmd_unarchive(a):
 
 
 def cmd_add(a):
+    """写入口（AI 门禁/test 幂等/重扫更新/dedup 归并全收口于此）。
+    返回落库事件 id：新建=新行 id；重扫更新=既有记录 id；dedup 合并=主条目 id（未新建行）。"""
     if getattr(a, "detail_file", ""):
         with open(a.detail_file, encoding="utf-8") as f:
             a.detail = f.read()
@@ -104,13 +106,14 @@ def cmd_add(a):
                  "纯脚本执行痕迹请勿入库——待审页只收可读记录")
     c = connect()
     try:
-        _add_write(c, a, status, req_val, resp_val, req_text, resp_text)
+        return _add_write(c, a, status, req_val, resp_val, req_text, resp_text)
     finally:
         c.close()
 
 
 def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
-    """cmd_add 的落库主体（连接由 cmd_add 持有并在 finally 关闭，测试直调不留泄漏连接）。"""
+    """cmd_add 的落库主体（连接由 cmd_add 持有并在 finally 关闭，测试直调不留泄漏连接）。
+    返回落库事件 id：新建=新行 id；重扫更新=既有记录 id；dedup 合并=主条目 id（未新建行）。"""
     require_project(c, a.project)
     # test 幂等：同 project+source+title+detail 指纹相同视为重复执行（如脚本双跑），拒绝入库
     if a.kind == "test":
@@ -170,7 +173,7 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
                 rebuild_assets(c, a.project)
                 c.commit()
             print(f"[ok] 重扫更新 #{dup['id']} ({a.kind}: {a.value[:50]}) ｜ {summary}")
-            return
+            return dup["id"]
     # 写入口硬门禁：判定漏洞必须带真实报文（此前只在 lint 事后报 error，AI 不跑 lint 即绕过——收口到写入即拒绝）
     if a.kind == "finding" and (not req_val or not resp_val):
         if not (getattr(a, "waive_capture", "") or "").strip():
@@ -215,7 +218,7 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
                 c.commit()
                 print(f"[ok] 同指纹重复：报文已转挂主条目 #{master['id']}（指纹 {dedup}），"
                       f"不新建待审条目；强制独立成条加 --no-dedupe")
-                return
+                return master["id"]
     merge_key = a.merge_key or (a.value if a.kind == "domain" else "")
     verified = now() if status == "confirmed" else ""
     ts = now()
@@ -275,6 +278,7 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
         rebuild_assets(c, a.project)
         c.commit()
     print(f"[ok] 事件 #{cur.lastrowid} 已入库 ({a.kind}: {a.value[:60]}) status={status}")
+    return cur.lastrowid
 
 
 # ---------------- probe 观测层（Burp 式：扫描所见逐条入 raw_events，零门槛、纯观测、不参与资产归并） ----------------

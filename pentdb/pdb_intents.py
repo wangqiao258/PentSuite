@@ -14,6 +14,7 @@ plan_steps 共享 todolist：串行攻击链（发现注入点→取凭据→横
   - intent 关闭后（done/dead）不再接受新观测挂接（add/exec --intent 校验拒绝）；
   - plan next 的依赖晋升是显式可审计的写操作（log_change plan-ready），不做隐式推导。
 """
+import re
 import sys
 
 from pdb_core import connect, log_change, now, require_project
@@ -22,6 +23,7 @@ VALID_INTENT_STATUS = ("active", "done", "dead")
 VALID_PLAN_STATUS = ("blocked", "ready", "doing", "done", "skip")
 PLAN_CLOSED = ("done", "skip")          # 视为"已完成"的依赖终态
 PLAN_OPEN = ("blocked", "ready", "doing")
+VALID_HINT_STATUS = ("open", "absorbed")
 
 
 # ---------------- 意图层（探索血缘） ----------------
@@ -103,6 +105,7 @@ def cmd_intent(a):
             print(f"[ok] 意图 #{iid} 已建立：{a.goal.strip()}"
                   + (f"（父 #{a.parent}）" if a.parent else ""))
             print(f"     挂接观测: add/exec --project {a.project} --intent {iid} …")
+            print_open_hints(c, a.project)
         elif a.intent_cmd == "list":
             require_project(c, a.project)
             show_all = getattr(a, "all_", False)
@@ -142,6 +145,12 @@ def cmd_intent(a):
         elif a.intent_cmd == "close":
             intent_close(c, a.project, a.id, a.status, a.note)
             print(f"[ok] 意图 #{a.id} → {a.status}" + (f" ｜ {a.note}" if a.note else ""))
+            bound = open_hints(c, a.project, a.id)
+            if bound:
+                hint_absorb(c, a.project, [h["id"] for h in bound],
+                            note=f"随意图 #{a.id} 关闭自动吸收")
+                print(f"[吸收] 绑定 hints 已随意图关闭自动吸收: "
+                      + ",".join(f"#{h['id']}" for h in bound))
     finally:
         c.close()
 
@@ -229,6 +238,7 @@ def cmd_plan(a):
                 "ORDER BY seq", (a.project,)).fetchall()
             if promoted:
                 print(f"[解锁] 前置已满足 → 可执行: " + "；".join(f"#{i} {t[:40]}" for i, t in promoted))
+            print_open_hints(c, a.project)
             if not rows:
                 print("[i] 无可执行步骤：plan add 追加，或确认所有方向已收口（intent list 核对）")
                 return
@@ -240,6 +250,9 @@ def cmd_plan(a):
                 doing = "（执行中）" if r["status"] == "doing" else ""
                 ig = f" ｜ 意图 #{r['intent_id']} {imap.get(r['intent_id'], '')[:36]}" if r["intent_id"] else ""
                 print(f"#{r['id']} seq={r['seq']} {doing}{r['title']}{ig}")
+            print_open_hints(c, a.project)
+        elif a.plan_cmd == "review":
+            _plan_review(c, a)
         elif a.plan_cmd in ("done", "skip"):
             require_project(c, a.project)
             row = _plan_row(c, a.project, a.id)
@@ -258,6 +271,7 @@ def cmd_plan(a):
             promoted = _plan_promote(c, a.project)
             if promoted:
                 print("[解锁] " + "；".join(f"#{i} {t[:40]}" for i, t in promoted))
+            print_open_hints(c, a.project)
         elif a.plan_cmd == "list":
             require_project(c, a.project)
             show_all = getattr(a, "all_", False)
@@ -276,3 +290,183 @@ def cmd_plan(a):
                 print(f"#{r['id']} seq={r['seq']} [{r['status']}] {r['title'][:60]}{dep_s}{ig}")
     finally:
         c.close()
+
+
+# ---------------- Hint 通道（v11，借鉴 Cairn Hint 原语） ----------------
+
+def hint_add(c, project, text, intent_id=0):
+    """注入人工判断（hint）：随时可加；AI 在 intent add / plan next / plan review 时读取。"""
+    require_project(c, project)
+    if not (text or "").strip():
+        sys.exit("[x] --text 必填：一条 hint=一条人工判断/线索（如：admin 后台疑似默认口令，先查版本）")
+    if intent_id:
+        _require_intent(c, project, intent_id)
+    cur = c.execute(
+        "INSERT INTO hints(project,text,intent_id,status,created_at) VALUES(?,?,?,'open',?)",
+        (project, text.strip(), intent_id or 0, now()))
+    log_change(c, project, "hint-add",
+               f"#{cur.lastrowid} {text.strip()[:60]}" + (f" ｜ 绑定意图 #{intent_id}" if intent_id else ""))
+    c.commit()
+    return cur.lastrowid
+
+
+def open_hints(c, project, intent_id=0):
+    """未吸收 hints：intent_id>0 只取绑定该意图的，否则取全部未吸收。"""
+    if intent_id:
+        return c.execute("SELECT * FROM hints WHERE project=? AND intent_id=? AND status='open' "
+                         "ORDER BY id", (project, intent_id)).fetchall()
+    return c.execute("SELECT * FROM hints WHERE project=? AND status='open' "
+                     "ORDER BY id", (project,)).fetchall()
+
+
+def print_open_hints(c, project, intent_id=0):
+    """挂接点提示块：intent add / plan next / plan done 输出未吸收 hints（AI 的读取时机）。
+    无 open hints 时零输出（不制造噪音）。"""
+    rows = open_hints(c, project, intent_id)
+    if not rows:
+        return
+    where = f"绑定意图 #{intent_id}" if intent_id else "全项目"
+    print(f"-- 未吸收 hints {len(rows)} 条（{where}；用掉后 hint absorb --ids N 留痕关单）:")
+    for h in rows:
+        b = f" ｜ 绑定 #{h['intent_id']}" if h["intent_id"] else ""
+        print(f"   hint#{h['id']}{b} {h['text'][:70]}")
+
+
+def hint_absorb(c, project, ids, note=""):
+    """吸收关单（人工或自动联动）：open → absorbed，changelog 留痕。返回本次吸收的 id 列表。"""
+    require_project(c, project)
+    absorbed = []
+    for hid in ids:
+        row = c.execute("SELECT * FROM hints WHERE id=? AND project=?", (hid, project)).fetchone()
+        if not row:
+            sys.exit(f"[x] hint 不存在: #{hid}")
+        if row["status"] != "open":
+            continue  # 幂等：已是终态静默跳过
+        c.execute("UPDATE hints SET status='absorbed', absorbed_at=? WHERE id=?", (now(), hid))
+        log_change(c, project, "hint-absorb",
+                   f"#{hid} {row['text'][:60]}" + (f" ｜ {note}" if note else ""))
+        absorbed.append(hid)
+    if absorbed:
+        c.commit()
+    return absorbed
+
+
+def cmd_hint(a):
+    """hint 子命令入口：add / list / absorb。"""
+    c = connect()
+    try:
+        if a.hint_cmd == "add":
+            iid = getattr(a, "intent_id", 0) or 0
+            hid = hint_add(c, a.project, a.text, iid)
+            print(f"[ok] hint #{hid} 已注入: {a.text.strip()}"
+                  + (f"（绑定意图 #{iid}）" if iid else ""))
+        elif a.hint_cmd == "list":
+            require_project(c, a.project)
+            show_all = getattr(a, "all_", False)
+            sql = "SELECT * FROM hints WHERE project=?"
+            if not show_all:
+                sql += " AND status='open'"
+            rows = c.execute(sql + " ORDER BY id", (a.project,)).fetchall()
+            if not rows:
+                print(f"[i] {'无 hints' if show_all else '无未吸收 hints（--all 查看含已吸收）'}；"
+                      f"hint add --project {a.project} --text '<判断>' 注入")
+                return
+            for h in rows:
+                mark = "[待吸收]" if h["status"] == "open" else "[已吸收]"
+                b = f" ｜ 绑定 #{h['intent_id']}" if h["intent_id"] else ""
+                ab = f" ｜ 吸收于 {h['absorbed_at']}" if h["status"] == "absorbed" else ""
+                print(f"hint#{h['id']} {mark}{b} {h['text']} ｜ {h['created_at']}{ab}")
+        elif a.hint_cmd == "absorb":
+            ids = [int(x) for x in (a.ids or "").split(",") if x.strip().isdigit()]
+            if not ids:
+                sys.exit("[x] --ids 必填：要吸收的 hint id（逗号分隔，如 --ids 1,2）")
+            done_ids = hint_absorb(c, a.project, ids, getattr(a, "note", "") or "")
+            if not done_ids:
+                print("[i] 没有可吸收的 hint（均已是 absorbed 或不存在）")
+            else:
+                print(f"[ok] 已吸收 hints: {','.join(map(str, done_ids))}")
+    finally:
+        c.close()
+
+
+# ---------------- plan review（批次2：Reason 式图级复盘） ----------------
+
+def _plan_checkpoint(c, project):
+    """上次复盘检查点：(at, (events, hints, open_intents))；从未复盘返回 None。"""
+    row = c.execute("SELECT at, detail FROM changelog WHERE project=? AND action='plan-review' "
+                    "ORDER BY id DESC LIMIT 1", (project,)).fetchone()
+    if not row:
+        return None
+    m = re.search(r"events=(\d+) hints=(\d+) open_intents=(\d+)", row["detail"] or "")
+    return (row["at"], tuple(map(int, m.groups())) if m else None)
+
+
+def _plan_review(c, a):
+    """图级复盘（借鉴 Cairn Reason 任务）：
+    只读模式（无 --note）：打印复盘包——检查点比对触发判定 + 意图全景 + 未吸收 hints；
+    落库模式（--note + --refs）：结论必须引用依据观测 id（complete 论证规范），裸判断拒绝落库。
+    检查点数字随复盘结论写入 changelog，作为下次比对基准（图更新即复盘，非定时）。"""
+    require_project(c, a.project)
+    proj = a.project
+    n_events = c.execute("SELECT COUNT(*) n FROM raw_events WHERE project=? AND voided=0",
+                         (proj,)).fetchone()["n"]
+    n_hints = c.execute("SELECT COUNT(*) n FROM hints WHERE project=? AND status='open'",
+                        (proj,)).fetchone()["n"]
+    n_open = c.execute("SELECT COUNT(*) n FROM intents WHERE project=? AND status='active'",
+                       (proj,)).fetchone()["n"]
+    last = _plan_checkpoint(c, proj)
+    trig = []
+    if last is None:
+        prev = "无上次复盘记录"
+        trig.append("首次复盘")
+    else:
+        at, chk = last
+        if chk is None:
+            prev = f"上次 {at[:19]}（检查点解析失败，按首次处理）"
+            trig.append("检查点缺失")
+        else:
+            pe, ph, po = chk
+            prev = (f"上次 {at[:19]} ｜ events {pe}→{n_events} ｜ hints {ph}→{n_hints}"
+                    f" ｜ open_intents {po}→{n_open}")
+            if n_events > pe:
+                trig.append(f"新增观测 +{n_events - pe}")
+            if n_hints > ph:
+                trig.append(f"新增 hints +{n_hints - ph}")
+            if po > 0 and n_open == 0:
+                trig.append("全部意图已收口")
+    print("== 探索复盘（图级 Reason）==")
+    print(f"检查点: {prev}")
+    print(f"触发判定: {'需要复盘（' + '；'.join(trig) + '）' if trig else '无变化，可跳过复盘'}")
+    rows = c.execute("SELECT * FROM intents WHERE project=? ORDER BY id", (proj,)).fetchall()
+    if rows:
+        print(f"-- 意图全景 {len(rows)} 条:")
+        for r in rows:
+            n = c.execute("SELECT COUNT(*) n FROM raw_events WHERE intent_id=? AND voided=0",
+                          (r["id"],)).fetchone()["n"]
+            print(f"   #{r['id']} [{r['status']}] {r['goal'][:56]} ｜ 挂接 {n}")
+    else:
+        print("-- 意图全景: 空（intent add 建方向后再复盘才有图可比）")
+    print_open_hints(c, proj)
+    if not (getattr(a, "note", "") or "").strip():
+        return
+    refs = [int(x) for x in (getattr(a, "refs", "") or "").split(",") if x.strip().isdigit()]
+    if not refs:
+        sys.exit("[x] --refs 必填：复盘结论必须引用依据观测 id（如 --refs 123,124），裸判断不落库")
+    bad = [str(rid) for rid in refs
+           if not c.execute("SELECT 1 FROM raw_events WHERE id=? AND project=?",
+                            (rid, proj)).fetchone()]
+    if bad:
+        sys.exit(f"[x] 引用的观测不存在: #{','.join(bad)}（本项目中核对后重试）")
+    detail = a.note.strip() + "\n【依据】" + ",".join(f"#{r}" for r in refs)
+    cur = c.execute(
+        "INSERT INTO raw_events(project,kind,value,title,detail,status,confidence,source,origin,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (proj, "note", "plan-review", "探索复盘", detail, "new", "high", "plan-review",
+         "agent", now()))
+    log_change(c, proj, "plan-review",
+               f"#{cur.lastrowid} events={c.execute('SELECT COUNT(*) n FROM raw_events WHERE project=? AND voided=0', (proj,)).fetchone()['n']}"
+               f" hints={n_hints} open_intents={n_open} "
+               f"｜ refs {','.join('#' + str(r) for r in refs)}")
+    c.commit()
+    print(f"[ok] 复盘结论 #{cur.lastrowid} 已落库（kind=note value=plan-review）")
+    print("     下一步: plan next 领步骤 / intent add 开新方向；批次收尾照常 lint")

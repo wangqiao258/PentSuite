@@ -1,7 +1,8 @@
 """探索血缘与计划层单测（stdlib unittest，零依赖）。运行：python -m unittest test_intents -v
 
 覆盖：
-  1. Schema v9/v10 迁移：intents/plan_steps 建表、raw_events.intent_id 加列、user_version=10
+  1. Schema v9-v12 迁移：intents/plan_steps/hints 建表、raw_events.intent_id 加列、
+     projects.profile 加列、user_version=12
   2. intent 域：add/list/show/close；关闭后拒绝新挂接；父链校验
   3. add --intent 挂血缘（含 --update 补挂、重扫更新保留原意图）
   4. plan 域：依赖置 blocked、plan next 只出前置已满足步骤、done/skip 自动解锁下游
@@ -50,16 +51,19 @@ def plan_ns(cmd, **kw):
 
 
 class Migration(unittest.TestCase):
-    def test_schema_v10(self):
+    def test_schema_v12(self):
         c = pentdb.connect()
         try:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 10)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 12)
             names = {r[0] for r in c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertIn("intents", names)
             self.assertIn("plan_steps", names)
+            self.assertIn("hints", names)
             cols = [r[1] for r in c.execute("PRAGMA table_info(raw_events)")]
             self.assertIn("intent_id", cols)
+            pcols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
+            self.assertIn("profile", pcols)
         finally:
             c.close()
 

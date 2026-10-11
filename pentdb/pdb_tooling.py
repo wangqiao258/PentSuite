@@ -285,4 +285,4 @@ def cmd_bootstrap(a):
     print("===== PentDB =====")
     print(f"数据根（缺省即此）: {os.path.join(BASE, 'data', 'pentdb.db')}")
     print("  开面板: pentdb.py panel --project <目标>")
-    print("  回归  : cd pentdb && python -m unittest test_sop")
+    print("  回归  : python -m unittest discover -s pentdb/tests -t pentdb -p \"test_*.py\"（从仓库根执行）")
