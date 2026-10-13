@@ -11,9 +11,30 @@ ValueError，do_GET 无兜底 → 客户端收到连接断开而非 JSON 错误�
 `eid = int_param(q,"id"); if eid is None: return 400` 是两行直线代码，
 覆盖 int_param 全部边界即等价覆盖该分支行为。
 """
+import os
 import unittest
 
+import pdb_core
 import server
+
+
+class TestResolvePath(unittest.TestCase):
+    """resolve_path（2026-10-13 实证修复）：evidence.path 既有绝对也有相对套件根的，
+    读侧统一解析——绝对原样、相对按套件根拼、空串原样。防 CWD 依赖假阳性
+    （CLI 在仓库根跑得过、面板进程 CWD 不同就误报 E-101 堵死报告门禁）。"""
+
+    def test_absolute_unchanged(self):
+        self.assertEqual(server.resolve_path("C:/x/y.log"), "C:/x/y.log")
+
+    def test_relative_joins_suite_root(self):
+        self.assertEqual(server.resolve_path("pentdb/data/x.log"),
+                         os.path.join(os.path.dirname(pdb_core.BASE), "pentdb/data/x.log"))
+
+    def test_empty_and_backslash(self):
+        self.assertEqual(server.resolve_path(""), "")
+        self.assertEqual(server.resolve_path(None), None)
+        self.assertEqual(server.resolve_path("pentdb\\data\\x.log"),
+                         os.path.join(os.path.dirname(pdb_core.BASE), "pentdb\\data\\x.log"))
 
 
 class TestIntParam(unittest.TestCase):

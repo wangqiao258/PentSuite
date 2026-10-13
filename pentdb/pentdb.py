@@ -42,7 +42,7 @@ from pdb_core import (ASSET_KINDS, BASE, DB_PATH, EVIDENCE_READ_LIMIT,
                       FACT_KINDS, SCHEMA, SOP_CFG, STALE_DAYS, VALID_KINDS,
                       VALID_ORIGIN, VALID_SEVERITY, VALID_SCOPE, VALID_STATUS,
                       attach_evidence, connect, decode_text_compat, log_change,
-                      now, read_text_compat, require_project)
+                      now, read_text_compat, require_project, resolve_path)
 from pdb_assets import (_norm_domain, _resolve_host, _split_hostport,
                         apply_review, asset_is_stale, asset_review_state,
                         cmd_add, cmd_archive, cmd_init, cmd_pending,
@@ -61,8 +61,8 @@ from pdb_intents import (VALID_INTENT_STATUS, VALID_PLAN_STATUS,
                          cmd_hint, cmd_intent, cmd_plan, hint_add, hint_absorb,
                          intent_add, intent_close)
 from pdb_report import (FINDING_MARKS, STATE_ICON, VERIFY_FRAME, _hints_menu,
-                        _parse_finding_detail, _pentest_report, _term_in,
-                        cmd_sop, load_sop_cfg, sop_report)
+                        _parse_finding_detail, _pentest_report, _retest_parent,
+                        _term_in, cmd_sop, load_sop_cfg, sop_report)
 from pdb_tooling import (_CREDS_OUT_KEYS, _bootstrap_creds, _bootstrap_deps,
                          _creds_skeleton, _kb_tags, _venv_python, cmd_bootstrap,
                          cmd_hook_install, cmd_js, cmd_kb, cmd_panel, cmd_recon,
@@ -207,7 +207,7 @@ def lint_report(c, project, journal_check=True):
     for er in c.execute("SELECT id, event_id, path FROM evidence WHERE project=?", (project,)):
         if er["event_id"] in voided_ids:
             continue
-        if (er["path"] or "") and not os.path.exists(er["path"]):
+        if (er["path"] or "") and not os.path.exists(resolve_path(er["path"])):
             err(code="E-101", rid=er["id"], what="证据文件丢失",
                 why="登记在库的证据文件在磁盘上找不到（证据链断裂）",
                 fix="重新取证后用 evidence 挂回，或核实后移除该证据登记")
@@ -334,6 +334,29 @@ def lint_report(c, project, journal_check=True):
                 what=f"命令流水未入库 ×{n}: {shown}",
                 why="执行流水里有探测命令，库内无对应 test 记录（测了没记）",
                 fix="exec 单通道补记，或 add --kind test 登记结论")
+    # 对账④：人审批注纪律（reviews 表，面板/CLI 共用；健康度提示不阻断）
+    # 对齐 HackerOne「状态转移必带评论」：无批注的确认/驳回不可追溯判断依据；
+    # 驳回建议前缀枚举（误报/越界/无法复现/重复）便于统计与筛检——格式类提示，非门禁。
+    try:
+        for row in c.execute(
+                "SELECT r.event_id AS eid, r.action AS act FROM reviews r "
+                "JOIN raw_events e ON e.id=r.event_id WHERE e.project=? AND trim(r.note)=''",
+                (project,)).fetchall():
+            warn(code="R-701", rid=row["eid"],
+                 what=f"人审无批注：#{row['eid']} -> {row['act']}",
+                 why="无理由的确认/驳回无法追溯判断依据（转移必带评论惯例）",
+                 fix="本条仅提示；下次人审在批注框/CLI --note 留理由即可")
+        for row in c.execute(
+                "SELECT r.event_id AS eid, r.note AS nt FROM reviews r "
+                "JOIN raw_events e ON e.id=r.event_id WHERE e.project=? AND r.action='rejected' "
+                "AND trim(r.note)!='' AND substr(trim(r.note),1,2) NOT IN ('误报','越界','重复','无法')",
+                (project,)).fetchall():
+            warn(code="R-702", rid=row["eid"],
+                 what=f"驳回批注缺标准前缀：#{row['eid']}（{row['nt'][:24]}）",
+                 why="驳回理由建议前缀：误报/越界/无法复现/重复（便于统计与筛检）",
+                 fix="下次驳回用标准前缀；本条仅提示不阻断")
+    except Exception:
+        pass  # reviews 缺列/旧库结构差异——健康度检查自身不得阻断 lint
     return {"errors": [_fmt_lint(i) for i in errors],
             "warns": [_fmt_lint(i) for i in warns],
             "items": {"errors": errors, "warns": warns},
@@ -693,7 +716,8 @@ def main():
     s.set_defaults(plan_cmd="next")
 
     s = psub.add_parser("review", help="Reason 式图级复盘：检查点比对触发判定+复盘包；"
-                                       "--note 落库结论（必须 --refs 引用观测 id，裸判断拒绝）")
+                                       "--note 落库结论（必须 --refs 引用观测 id，裸判断拒绝；"
+                                       "落库为记录、自动确认，不占人审待办）")
     s.add_argument("--project", required=True)
     s.add_argument("--note", default="", help="复盘结论（落库 kind=note value=plan-review；留空=只打印复盘包）")
     s.add_argument("--refs", default="", help="结论依据的观测 id（逗号分隔，--note 时必填，如 --refs 123,124）")

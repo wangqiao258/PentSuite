@@ -25,7 +25,7 @@ PY = sys.executable  # 测试内嵌命令用当前解释器，路径无空格
 
 
 def ns(**kw):
-    base = dict(project=PROJ, parent_ext="1", stage="", action="", title="",
+    base = dict(project=PROJ, parent_ext="1", action="", title="",
                 note="", detail="", severity="", confidence="high",
                 timeout=30, cmd="")
     base.update(kw)

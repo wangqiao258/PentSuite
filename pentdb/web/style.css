@@ -12,6 +12,12 @@
   select,button,input{font:inherit;padding:4px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--tx)}
   select:focus,input:focus{outline:1px solid var(--purple)}
   button{cursor:pointer} button:hover{border-color:var(--purple)}
+  /* 人审三按钮分层（对齐成熟产品：一主一次一危险，颜色只表语义）：
+     确认=全操作区唯一填充主按钮（品牌紫）；驳回=中性描边次按钮（否定决策不用红）；
+     作废记录=危险轻量：红描边+红字+「可撤销」徽标（可逆故走轻量，不抢主按钮权重） */
+  .btn-void{background:var(--card);color:var(--red);border-color:var(--red);font-size:12px;padding:3px 10px}
+  .btn-void:hover{background:var(--red-bg);border-color:var(--red)}
+  .btn-void .ub{margin-left:5px;padding:0 6px;border-radius:8px;background:var(--gray-bg);color:var(--tx2);font-size:11px}
   .tabs{display:flex;gap:var(--sp1);padding:var(--sp2) var(--sp5) 0;background:var(--card);border-bottom:1px solid var(--line)}
   .tabs button{border:1px solid transparent;border-bottom:none;background:none;color:var(--tx2);border-radius:8px 8px 0 0;padding:6px 14px}
   .tabs button.on{background:var(--bg);border-color:var(--line);color:var(--purple);font-weight:500}
@@ -56,8 +62,9 @@
   .rec:last-child{border-bottom:none}
   .rec .hd b{font-size:13px}
   .src{color:var(--tx2);font-size:12px;font-family:Consolas,monospace;word-break:break-all}
-  .btn-ok{background:var(--teal-bg);color:var(--teal);border-color:var(--teal)}
-  .btn-no{background:var(--red-bg);color:var(--red);border-color:var(--red)}
+  .btn-ok{background:var(--purple);color:#fff;border-color:var(--purple)}
+  .btn-ok:hover{border-color:var(--purple)}
+  .btn-no{background:var(--card);color:var(--tx);border-color:var(--line)}
   .grp{margin:0 0 14px} .grp h4{margin:6px 0;font-size:13px;color:var(--purple);font-weight:500}
   .grp li{margin:2px 0}
   .muted{color:var(--tx2);font-size:12px}
@@ -91,7 +98,6 @@
   .fd-tab.on{color:var(--purple);border-color:var(--purple);font-weight:500}
   .filters{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center}
   tr.on td{background:var(--bg);box-shadow:inset 3px 0 0 var(--purple)}
-  .arow{cursor:pointer}
   #review-table{table-layout:fixed}
   #tl-events,#tl-changes{table-layout:fixed}
   #tl-events th:nth-child(1),#tl-changes th:nth-child(1){width:150px}
@@ -108,22 +114,11 @@
   #review-table .rv-inner{padding:6px 4px}
   #review-table .rv-detail pre{margin:4px 0 8px;max-height:300px;overflow:auto}
   .mini{font-size:11px;padding:0 8px;margin-left:6px}
-  /* 资产页：左（树+表格，主栏）右（下钻，从栏），Burp 式主-从比例 */
+  /* 资产页（批次 2 去表）：左（树，主栏）右（详情，从栏），Burp Site Map 式主-从比例 */
   .assets-grid{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:var(--sp3);align-items:start}
   @media (max-width:920px){.assets-grid{grid-template-columns:minmax(0,1fr)}}
-  /* 资产表 8 列定宽：key 列 ellipsis、tag 列紧凑、日期列保底 */
-  #asset-table{table-layout:fixed}
-  #asset-table th:nth-child(1){width:240px}
-  #asset-table th:nth-child(2){width:64px}
-  #asset-table th:nth-child(3){width:150px}
-  #asset-table th:nth-child(4){width:90px}
-  #asset-table th:nth-child(5){width:110px}
-  #asset-table th:nth-child(6){width:70px}
-  #asset-table th:nth-child(7){width:165px}
-  #asset-table th:nth-child(8){width:78px}
-  #asset-table td{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
   .asset-tree-panel h3{margin-top:0}
-  .asset-tree{max-height:40vh;overflow:auto;font-size:13px}  /* 树折叠进左栏 details 内：限高避免树独占左栏滚动 */
+  .asset-tree{max-height:calc(40vh + 120px);overflow:auto;font-size:13px}  /* 去表后树独占左栏：放宽限高（原 40vh 为给表格留位） */
   .tnode{display:flex;align-items:center;gap:5px;padding:2px 6px;border-radius:6px;cursor:pointer;white-space:nowrap}
   .tnode:hover{background:var(--gray-bg)}
   .tnode.on{background:var(--blue-bg)}
@@ -141,6 +136,14 @@
   .tlabel{overflow:hidden;text-overflow:ellipsis;min-width:0}
   .tcount{flex:none;font-size:11px;color:var(--tx2);background:var(--gray-bg);border-radius:8px;padding:0 6px}
   .tvuln{flex:none;font-size:11px;line-height:16px;color:#fff;background:var(--red);border-radius:8px;padding:0 6px;margin-left:4px;min-width:14px;text-align:center}
+  /* 漏洞徽标按子树最高严重度着色（ZAP 式，v-xxx 与 sev 枚举对齐；默认=红=crit） */
+  .tvuln.v-crit{background:var(--red)}
+  .tvuln.v-high{background:#993c1d}
+  .tvuln.v-med{background:var(--amber)}
+  .tvuln.v-low{background:var(--blue)}
+  .tvuln.v-info,.tvuln.v-none{background:var(--tx2)}
+  /* D3 归因孤儿警示行：finding 归因未落到任何资产，树上静默不可见 → 显式提示（点击跳发现页） */
+  .torphan{font-size:12px;color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber);border-radius:8px;padding:2px 8px;margin-bottom:6px;cursor:pointer}
   .tree-sel{display:flex;align-items:center;gap:8px;background:var(--blue-bg);border:1px solid var(--blue);color:var(--blue);border-radius:8px;padding:3px 10px;margin-bottom:10px;font-size:13px}
   .tree-sel.hidden{display:none}
   /* 资产明细下钻分区（属性卡 / 关联漏洞 / 证据直达 / 参数表 / 原始观测折叠） */
@@ -163,8 +166,6 @@
   .pdirname{font-weight:500;cursor:pointer}
   .plabel{cursor:default;overflow:hidden;text-overflow:ellipsis;min-width:0}
   .phist{flex:none;font-size:11px;color:var(--blue,#185FA5);background:var(--blue-bg,#E6F1FB);border-radius:8px;padding:0 6px;cursor:pointer}
-  .pmeta{flex:1;text-align:right;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .phistr{font-size:12px;opacity:.75}
   /* master-detail：树行只留状态色点，元数据进下方详情区 */
   .pdot{display:inline-block;width:9px;height:9px;border-radius:50%;flex:none}
   .pdot.p-2xx{background:#3B6D11}

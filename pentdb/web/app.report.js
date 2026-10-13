@@ -21,13 +21,13 @@ async function loadLint(btn){
       (it.waive?` <span style="color:var(--amber)">｜ ${esc(it.waive)}</span>`:"")+
       `</div>`;
     $("#lint-out").innerHTML=
-      (E.length?`<div style="margin:6px 0 2px;font-weight:500;color:var(--tx2)">阻断（逐条修复；豁免/作废决定在发现页对应记录上做）`+
+      (E.length?`<div style="margin:6px 0 2px;font-weight:500;color:var(--tx2)">阻断（逐条修复；豁免/作废去发现页对应记录上操作）`+
         ` <button class="mini" onclick="goFindingsWaive()">去处理 →</button></div>`+
         E.map(itemHtml).join(""):"")+
-      (dw.length?`<div style="margin:6px 0 2px;font-weight:500;color:var(--tx2)">豁免待确认（确认=放行，作废=恢复阻断；均为人的决定，留痕不可逆）`+
+      (dw.length?`<div style="margin:6px 0 2px;font-weight:500;color:var(--tx2)">豁免待确认（确认=放行，作废=恢复阻断；都是人工决定，不可撤销）`+
         ` <button class="mini" onclick="goFindingsWaive()">去处理 →</button></div>`+
         dw.map(w=>`<div style="margin:2px 0;color:var(--amber)">⚠ wid=${w.id}（#${w.event_id} ${esc(w.term)}）：${esc(w.reason||"")}</div>`).join(""):"")+
-      (W.length?`<div style="margin:6px 0 2px;font-weight:500;color:var(--tx2)">数据健康度（格式类提示，不阻断、不拦截报告）</div>`+
+      (W.length?`<div style="margin:6px 0 2px;font-weight:500;color:var(--tx2)">数据健康度（格式类提示，不挡报告）</div>`+
         W.map(w=>`<div style="margin:2px 0;color:var(--amber)">⚠ <b>${esc(w.code)}${w.rid?" #"+w.rid:""} ${esc(w.what)}</b> `+
           `<span style="color:var(--tx2)">— ${esc(w.why)}</span> <span style="color:var(--teal)">｜ 修复: ${esc(w.fix)}</span></div>`).join(""):"")||
       "<span style='color:var(--teal)'>全部记录通过门禁检查（溯源 / 状态 / 归因 / 证据链）</span>";

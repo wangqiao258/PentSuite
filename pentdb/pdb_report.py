@@ -46,13 +46,17 @@ def _pentest_report(c, project):
                      (project,)).fetchall()
     findings = [r for r in rows if r["kind"] == "finding" and r["status"] == "confirmed"]
     pending = [r for r in rows if r["status"] == "new"]
+    # 复测记录（人审确认的 test 才进报告——确认=真下游，与队列页按钮 tooltip 同一口径）：
+    retests = [r for r in rows if r["kind"] == "test" and r["status"] == "confirmed"]
+    by_id = {r["id"]: r for r in rows}
     domains_in = [r["value"] for r in rows if r["kind"] == "domain" and r["scope"] == "in"]
     now_s = now()
     out = [f"# {project} 渗透测试报告", "",
            f"生成时间: {now_s} ｜ 模板: pentest", "",
            "## 1 执行摘要",
            f"- 测试对象: {project}",
-           f"- confirmed 发现: {len(findings)} 条 ｜ 待审项: {len(pending)} 条",
+           f"- confirmed 发现: {len(findings)} 条 ｜ 已确认复测: {len(retests)} 条"
+           f" ｜ 待审项: {len(pending)} 条",
            f"- 资产: 域名 {sum(1 for r in rows if r['kind']=='domain')} 条（in-scope {len(domains_in)}）",
            "", "## 2 范围与授权",
            "- in-scope 资产: " + (", ".join(domains_in[:30]) if domains_in else "（见附录）"),
@@ -85,17 +89,72 @@ def _pentest_report(c, project):
             out.append("**证据**:")
             for e in evs:
                 out.append(f"- `{e['path']}`（sha256={e['sha256'][:16]}…）")
+    sec = 4
+    if retests:
+        # 按母 finding 分组（与 lifecycle 自动联动同轴）；无母 finding 的归「未关联」尾组
+        groups, orphan = {}, []
+        for t in retests:
+            p = _retest_parent(by_id, t["parent_ext"])
+            if p:
+                groups.setdefault(p["id"], []).append(t)
+            else:
+                orphan.append(t)
+        out += ["", f"## {sec} 复测记录（已确认 {len(retests)} 条）",
+                "人审确认（review confirmed）的复测结论——报告引用的复现证据链；",
+                "结论与依据以落库 note 为准（结论词开头 + 依据段），未确认的复测不进报告。"]
+        n = 0
+        for pid in sorted(groups):
+            p = by_id[pid]
+            n += 1
+            out += ["", f"### {sec}.{n} {p['title'] or p['value']}"
+                    f"（#{p['id']} · {p['severity'] or '未定级'}）"]
+            for t in groups[pid]:
+                out += _retest_lines(c, t)
+        if orphan:
+            n += 1
+            out += ["", f"### {sec}.{n} 未关联发现的复测记录"]
+            for t in orphan:
+                out += _retest_lines(c, t)
+        sec += 1
     sug = c.execute(
         "SELECT id, title, detail, created_at FROM raw_events "
         "WHERE project=? AND kind='suggestion' AND voided=0 ORDER BY id DESC LIMIT 1",
         (project,)).fetchone()
     if sug:
-        out += ["", "## 4 复测计划（最新批次收尾）",
+        out += ["", f"## {sec} 复测计划（最新批次收尾）",
                 f"- 记录: suggestion #{sug['id']} ｜ 生成: {(sug['created_at'] or '')[:19]}",
                 "", sug["detail"] or sug["title"] or "（空计划）"]
-    out += ["", "## 5 附录：资产清单",
+        sec += 1
+    out += ["", f"## {sec} 附录：资产清单",
             "完整资产分组与状态见面板目标总览，或 `pentdb.py report --project " + project + "`（资产模式）。"]
     return "\n".join(out)
+
+
+def _retest_parent(rows_by_id, parent_ext):
+    """test 的 parent_ext（逗号分隔多对象）→ 首个可解析的母 finding 行（无则 None）。
+    与 sync_lifecycle_from_test 同语义：只认数字 id 且 kind=finding；取首个保证分组确定。"""
+    for p in (parent_ext or "").split(","):
+        p = p.strip()
+        if not p.isdigit():
+            continue
+        row = rows_by_id.get(int(p))
+        if row is not None and row["kind"] == "finding":
+            return row
+    return None
+
+
+def _retest_lines(c, t):
+    """单条已确认复测的报告行：结论（note 全文）+ 归因 + 来源 + 证据指针。"""
+    evs = c.execute("SELECT path, sha256 FROM evidence WHERE event_id=?", (t["id"],)).fetchall()
+    lines = ["", f"- #{t['id']} {t['value']}",
+             f"  - 结论: {(t['note'] or '').strip() or '（无结论备注）'}",
+             f"  - 归因: {t['parent_ext'] or '—'} ｜ 来源: {t['source']}"]
+    if evs:
+        lines.append("  - 证据: " + "；".join(
+            f"`{e['path']}`（sha256={e['sha256'][:16]}…）" for e in evs))
+    else:
+        lines.append("  - 证据: （无挂载）")
+    return lines
 
 
 def load_sop_cfg():

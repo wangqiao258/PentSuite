@@ -70,47 +70,39 @@
     </div>
     <div class="assets-grid">
       <div class="panel" style="overflow:auto;max-height:calc(100vh - 200px)">
-        <details class="asset-tree-details">
-          <summary style="cursor:pointer"><b>资产树</b><span class="muted" style="margin-left:6px;font-weight:400">点节点锚定子树，再点取消；⧉ 复制完整地址</span></summary>
+        <details class="asset-tree-details" id="asset-tree-box" open>
+          <summary style="cursor:pointer"><b>资产树</b><span class="muted" style="margin-left:6px;font-weight:400">点节点开详情；✕ 清除锚定；⧉ 复制完整地址</span></summary>
           <div class="filters" style="margin-bottom:4px">
             <input id="tree-q" placeholder="搜索路径 / 主机…" style="flex:1;min-width:120px" oninput="treeFilter()">
             <button onclick="expandAllTree()">展开</button>
             <button onclick="collapseAllTree()">折叠</button>
             <label class="muted"><input type="checkbox" id="tree-hidestale" onchange="treeFilter()">隐 30 天未见</label>
+            <label class="muted"><input type="checkbox" id="tree-vulnonly" onchange="treeFilter()">只看有洞</label>
           </div>
           <div id="asset-tree" class="asset-tree"><span class="muted">加载中…</span></div>
+          <div id="tree-sel-bar" class="tree-sel hidden"><span id="tree-sel-txt"></span>
+            <button class="mini" onclick="clearTreeSel()">✕ 清除</button></div>
         </details>
-        <div class="filters">
-          <select id="f-atype"><option value="">全部类型</option><option>domain</option><option>host</option><option>service</option><option>endpoint</option></select>
-          <select id="f-status"><option value="">全部状态</option><option value="confirmed">已确认</option><option value="pending">有待审</option><option value="rejected">已驳回</option></select>
-          <span id="code-chips" style="display:flex;gap:6px;flex-wrap:wrap"></span>
-          <input id="f-q" placeholder="搜索实体 key / 属性…" style="flex:1;min-width:180px">
-          <span id="asset-hint" class="muted"></span>
-          <button onclick="loadAssets()">查询</button>
-        </div>
-        <div id="tree-sel-bar" class="tree-sel hidden"><span id="tree-sel-txt"></span>
-          <button class="mini" onclick="clearTreeSel()">✕ 清除</button></div>
-        <div style="overflow-x:auto"><table id="asset-table"></table></div>
       </div>
       <div class="panel" style="overflow:auto;max-height:calc(100vh - 200px)">
-        <h3 style="margin-top:0">实体观测下钻<span class="muted" style="margin-left:6px;font-weight:400">点击资产行查看；观测即 raw_events，人审在「待审队列」做</span></h3>
-        <div id="asset-detail" class="muted">← 点击资产行下钻原始观测</div>
+        <h3 style="margin-top:0">资产详情<span class="muted" style="margin-left:6px;font-weight:400">点左侧树节点查看；观测即 raw_events，人审在「待审队列」做</span></h3>
+        <div id="asset-detail" class="muted">← 点击左侧树节点查看详情</div>
       </div>
     </div>
   </section>
   <section id="v-timeline" class="hidden">
     <div class="panel" style="overflow-x:auto"><h3>最近事件（倒序，最多 100 条）</h3><table id="tl-events"></table></div>
-    <div class="panel" style="overflow-x:auto"><h3>库操作留痕（changelog）</h3><table id="tl-changes"></table></div>
+    <div class="panel" style="overflow-x:auto"><h3>库操作记录（changelog）</h3><table id="tl-changes"></table></div>
   </section>
   <section id="v-review" class="hidden">
     <div class="panel" id="batch-bar" style="display:none">
       <h3>批量操作 · 已选 <span id="batch-n" class="tag t-kind">0</span> 条
-        <input id="batch-note" placeholder="批注（必填，写入每条留痕，如：同批 recon 来源采信）" style="min-width:280px">
-        <button class="btn-ok" onclick="doBatch('confirmed')">确认所选</button>
-        <button class="btn-no" onclick="doBatch('rejected')">驳回所选</button>
+        <input id="batch-note" placeholder="批注（必填，会记到每条记录上，如：同批 recon 来源采信）" style="min-width:280px">
+        <button class="btn-ok" id="batch-ok" onclick="doBatch('confirmed')">确认所选</button>
+        <button class="btn-no" id="batch-no" onclick="doBatch('rejected')">驳回所选</button>
       </h3>
     </div>
-    <div class="panel"><h3>AI 推断与待确认项 —— 队列只做判定：按来源分组、组头可整组判定（批注必填留痕）；点行展开判据卡（备注全文 + 同值历史），报文/证据在详情页唯一渲染、判据卡内一键跳转；同值已有已确认的重复嫌疑自动置底折叠，建议驳回或合并</h3><table id="review-table"></table></div>
+    <div class="panel"><h3>待审项（复测结论与批次计划在此审；漏洞记录在发现页审）—— 复测结论平铺：点行展开看母发现与依据，采信=该结论进入报告「复测记录」节（批注必填、会记到操作日志）；资产按来源分组可整组判定；报文和证据在详情页看；同值已有确认记录的自动置底，建议驳回或合并</h3><table id="review-table"></table></div>
   </section>
   <section id="v-explore" class="hidden">
     <div class="panel">

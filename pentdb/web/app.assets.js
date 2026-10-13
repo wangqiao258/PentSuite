@@ -1,66 +1,26 @@
-// PentDB 面板 · 资产明细视图：左树右表 / 实体下钻分区明细（属性卡·关联漏洞·证据·参数表·原始观测折叠）/ 手动补录区联动（#asset-tree 事件委托）
+// PentDB 面板 · 资产明细视图（树为唯一资产视图，2026-10-13 拍板去表）：左树右详情（Burp Site Map 双栏式）——
+// 树=导航+漏洞徽标（顶层=子树上卷总数、叶子=精确归因）；点树节点=选中+开详情；跳转（gotoAssets）=树定位，未命中降级树搜索；
+// 详情分区明细（属性卡·关联漏洞口径分层[host/domain=全部，endpoint/service=直接归因+同主机折叠]·证据·参数表·原始观测折叠）
 let adTab="ov";  // 详情页签态（ov/vuln/ev/raw），跨条目保持——连续查看同类信息不跳回
-let codeGroups=[];  // 响应码语义组多选：2xx/3xx/wall/404/5xx/none
-const CODE_GROUPS=[["2xx","2xx 可交互"],["3xx","3xx 跳转"],["wall","401/403 墙"],["404","4xx 其他"],["5xx","5xx 异常"],["none","未探测"]];
+// 漏洞徽标（ZAP 式）：严重度秩表 + 悬停列出子树 top 漏洞（折叠态即可判断轻重）
+const SEV_RANK={crit:5,high:4,med:3,low:2,info:1,"":0};
+function vulnHoverTitle(n){
+  if(!n||!n.vuln)return "";
+  const top=(n.vItems||[]).slice().sort((a,b)=>SEV_RANK[b.sev]-SEV_RANK[a.sev]).slice(0,5)
+    .map(it=>`${sevLabel(it.sev)} ｜ ${String(it.title).slice(0,40)}`);
+  return `子树漏洞 ${n.vuln} 条（最高 ${sevLabel(n.maxSev)}）`+
+    (top.length?"\n"+top.join("\n")+((n.vItems||[]).length>5?`\n… 共 ${n.vItems.length} 条`:""):"");
+}
+
 function reviewTag(r){
   return r==="pending"?`<span class="tag t-new">有待审</span>`
     :r==="confirmed"?`<span class="tag t-confirmed">已确认</span>`
     :`<span class="tag t-rejected">已驳回</span>`;
 }
-async function loadAssets(){
-  const params={project:PROJECT,atype:$("#f-atype").value,status:$("#f-status").value,q:$("#f-q").value,code_group:codeGroups.join(",")};
-  const d=await api("assets",params);
-  let assets=d.assets||[], sum=d.summary||{};
-  // 树选中锚定：在服务端过滤结果之上叠加子树成员集合过滤（区分树锚定语境，避免与"真实无资产"混读）
-  const treeOn=!!(TREE.sel&&TREE.selSet);
-  if(treeOn){const s=TREE.selSet;assets=assets.filter(a=>s.has(a.atype+"/"+a.akey));}
-  const hint=Object.keys(sum).sort().map(k=>`${k} ${sum[k]}`).join(" · ");
-  $("#asset-hint").textContent=(treeOn?`树锚定 · 子树匹配 ${assets.length} 条 ｜ `:`实体 ${assets.length} ｜ `)+hint;
-  const head="<tr><th>实体（规范 key）</th><th>类型</th><th>上级</th><th>属性</th><th>观测 / 审</th><th>范围</th><th>首见 · 末见</th><th>生命周期</th></tr>";
-  const rows=assets.map(a=>{
-      const sc=a.attrs.scopes||[];
-      const scope=sc.includes("in")?"in":(sc.length&&sc.every(x=>x==="out")?"out":"unknown");
-      const chips=[];
-      (a.attrs.ports||[]).forEach(x=>chips.push(":"+x));
-      (a.attrs.services||[]).forEach(x=>chips.push(x));
-      (a.attrs.techs||[]).forEach(x=>chips.push(x));
-      (a.attrs.params||[]).forEach(x=>chips.push("?"+x));
-      (a.attrs.codes||[]).forEach(x=>chips.push("HTTP "+x));
-      return `<tr class="arow ${selAsset===a.atype+"/"+a.akey?"on":""}" data-ak="${esc(a.atype+"/"+a.akey)}">`+
-        `<td title="${esc(a.akey)}"><b>${esc(a.akey)}</b></td><td>${kindTag(a.atype)}</td>`+
-        `<td class="muted" title="${a.parent_akey?esc(a.parent_atype+" : "+a.parent_akey):""}">${a.parent_akey?esc(a.parent_atype+" : "+a.parent_akey):"—"}</td>`+
-        `<td>${chips.map(c=>`<span class="tag t-kind">${esc(c)}</span>`).join(" ")||'<span class="muted">—</span>'}</td>`+
-        `<td>${a.obs} 条 ${reviewTag(a.review)}</td>`+
-        `<td>${scopeTag(scope)}</td>`+
-        `<td class="muted">${(a.first_seen||"").slice(0,10)} · ${(a.last_seen||"").slice(0,10)}</td>`+
-        `<td>${a.stale?'<span class="tag t-rejected">stale</span>':'<span class="tag t-confirmed">active</span>'}</td></tr>`;
-    }).join("");
-  $("#asset-table").innerHTML=head+(rows||"<tr><td>"+
-    (treeOn?"树锚定下无匹配资产（可点上方提示条 ✕ 清除锚定）":"无资产（rebuild-assets 可随时重建）")+
-    "</td></tr>");
-  if(selAsset&&!assets.some(a=>a.atype+"/"+a.akey===selAsset)){selAsset=null;$("#asset-detail").innerHTML="<span class='muted'>← 点击资产行下钻原始观测</span>";}
-  else renderAssetDetail();
-}
-$("#asset-table").onclick=e=>{
-  const row=e.target.closest(".arow"); if(!row)return;
-  const k=row.dataset.ak;
-  selAsset=(selAsset===k)?null:k;
-  loadAssets();
-};
-function renderCodeChips(){
-  $("#code-chips").innerHTML=CODE_GROUPS.map(([v,l])=>
-    `<span class="sev-chip ${codeGroups.includes(v)?"on":""}" data-cg="${v}">${l}</span>`).join("");
-}
-$("#code-chips").onclick=e=>{
-  const g=e.target.dataset&&e.target.dataset.cg; if(!g)return;
-  codeGroups=codeGroups.includes(g)?codeGroups.filter(x=>x!==g):[...codeGroups,g];
-  renderCodeChips(); loadAssets();
-};
-renderCodeChips();
 
 async function renderAssetDetail(){
   const box=$("#asset-detail");
-  if(!selAsset){box.innerHTML="<span class='muted'>← 点击资产行下钻原始观测</span>";return;}
+  if(!selAsset){box.innerHTML="<span class='muted'>← 点击左侧树节点查看详情</span>";return;}
   const i=selAsset.indexOf("/");
   const atype=selAsset.slice(0,i), akey=selAsset.slice(i+1);
   const all=(await api("assets",{project:PROJECT,atype})).assets.find(a=>a.akey===akey);
@@ -80,7 +40,7 @@ async function renderAssetDetail(){
   html+=`<div class="fd-tabs" id="ad-tabs">${tabs.map(([k,label])=>
     `<span class="fd-tab ${adTab===k?"on":""}" data-adtab="${k}">${label}</span>`).join("")}</div>`;
   // —— 概览：摘要行 + 结构化属性卡（Goby 式分组标签）+ 参数清单 ——
-  const ATTR_META=[["ports","端口"],["services","服务"],["techs","技术栈"],["params","参数"],["codes","状态码"],["titles","标题"],["scopes","范围"]];
+  const ATTR_META=[["ports","端口"],["services","服务"],["techs","技术栈"],["params","参数"],["codes","状态码"],["titles","标题"],["aliases","原路径形态"],["scopes","范围"]];
   const cards=ATTR_META.filter(([k])=>(attrs[k]||[]).length).map(([k,label])=>
     `<div class="attr-card"><span class="al">${label}</span>`+
     attrs[k].map(x=>`<span class="tag t-kind">${esc(x)}</span>`).join("")+`</div>`).join("");
@@ -88,15 +48,34 @@ async function renderAssetDetail(){
   const params=attrs.params||[];
   if(params.length)ov+=`<div class="ad-h">参数清单（注入面判断）</div>`+
     `<table><tr><th>参数名</th></tr>`+params.map(p=>`<tr><td>${esc(p)}</td></tr>`).join("")+`</table>`;
-  // —— 关联漏洞（finding/osint 按 parent_ext 归属，按严重度分组排序）——
+  // —— 关联漏洞·口径分层（消歧义，Burp 上卷语义）：树/表徽标=精确归因（parent_ext 事件∈本实体），
+  // 本页签后端是 host 级宽匹配（同主机全部）——两套口径并存曾致「行徽标 1 vs 详情 8」歧义。
+  // host/domain 顶层：宽=全部（单段）；endpoint/service 叶子：直接归因（与徽标恒等）排前 + 同主机（上下文，折叠弱化）
   const order=SEVS.map(s=>s[0]);
-  const bySev={};
-  (det.findings||[]).forEach(f=>{(bySev[f.severity||""]=bySev[f.severity||""]||[]).push(f)});
-  const sevHtml=order.filter(s=>bySev[s]).map(s=>
-    `<div class="ad-sev"><span class="tag sev-${s||"none"}">${sevLabel(s)} × ${bySev[s].length}</span>`+
-    bySev[s].map(f=>`<div class="rec"><div class="hd"><b>#${f.id}</b> ${kindTag(f.kind)} <b>${esc(f.title||f.value)}</b> ${lifeTag(lifeOf(f))} ${tag(f.status)}</div>`+
-      `<div class="src">归因: ${esc(f.parent_ext||"—")}</div></div>`).join("")+`</div>`).join("");
-  let vuln=sevHtml||`<span class='muted'>无关联漏洞</span>`;
+  const sevGroup=list=>{
+    const bySev={};
+    list.forEach(f=>{(bySev[f.severity||""]=bySev[f.severity||""]||[]).push(f)});
+    return order.filter(s=>bySev[s]).map(s=>
+      `<div class="ad-sev"><span class="tag sev-${s||"none"}">${sevLabel(s)} × ${bySev[s].length}</span>`+
+      bySev[s].map(f=>`<div class="rec"><div class="hd"><b>#${f.id}</b> ${kindTag(f.kind)} <b>${esc(f.title||f.value)}</b> ${lifeTag(lifeOf(f))} ${tag(f.status)}</div>`+
+        `<div class="src">归因: ${esc(f.parent_ext||"—")}</div></div>`).join("")+`</div>`).join("");
+  };
+  let vuln;
+  if(atype==="endpoint"||atype==="service"){
+    const myEvents=new Set(all.event_ids||[]);
+    const direct=[],indirect=[];
+    (det.findings||[]).forEach(f=>{
+      const evIds=String(f.parent_ext||"").split(",").map(s=>s.trim()).filter(s=>/^\d+$/.test(s)).map(Number);
+      (evIds.some(e=>myEvents.has(e))?direct:indirect).push(f);
+    });
+    vuln=`<div class="ad-h">直接归因 ${direct.length} 条 <span class="muted" style="font-weight:400">（与左侧徽标同口径）</span></div>`+
+      (sevGroup(direct)||`<span class='muted'>本端点无直接归因漏洞</span>`)+
+      (indirect.length?`<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">同主机关联 ${indirect.length} 条（归因不指向本端点，上下文参考）</summary>`+
+        sevGroup(indirect)+`</details>`:"");
+  }else{
+    vuln=`<div class="muted" style="font-size:11px;margin:4px 0">主机级归因：含子树全部漏洞</div>`+
+      (sevGroup(det.findings||[])||`<span class='muted'>无关联漏洞</span>`);
+  }
   // —— 报文·证据：探测报文（exec 自动解析）+ 证据直达 ——
   let ev="";
   const pkts=det.exec_packets||[];
@@ -115,13 +94,13 @@ async function renderAssetDetail(){
   const evHtml=(det.evidence||[]).map(e=>
     `<div class="rec"><div class="hd"><b>#${e.id}</b> <span class="tag t-kind">${esc(e.etype||"file")}</span> <b>${esc(e.note||e.ev_title||"")}</b>`+
     (e.exists?` <button class="mini" data-ev="${e.id}">查看</button>`:` <span class="tag sev-crit">文件缺失</span>`)+
-    `</div><div class="src" title="${esc(e.path)}">${esc(e.path)} ｜ ${esc(e.created_at||"")}</div></div>`+
+    `</div><div class="src" title="${esc(e.path)}">${esc(e.path)} ｜ ${fmtTime(e.created_at)}</div></div>`+
     `<pre class="hidden" id="evc-${e.id}"></pre>`).join("");
   ev+=`<div class="ad-h">证据</div>`+(evHtml||`<span class='muted'>无证据</span>`);
   // —— 原始观测回放（整页签即回放，不再套折叠层）——
   const replay=evs.map(r=>
     `<div class="rec"><div class="hd"><b>#${r.id}</b> ${kindTag(r.kind)} <b>${esc(r.value)}</b> ${tag(r.status)}`+
-    ` <span class="muted">${(r.created_at||"").slice(0,10)} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span></div>`+
+    ` <span class="muted">${fmtTime(r.created_at)} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span></div>`+
     (r.note?`<div class="muted">${esc(r.note)}</div>`:"")+
     `<div class="src">来源: ${esc(r.source)}</div></div>`).join("")||"<span class='muted'>无观测记录</span>";
   html+=[["ov",ov],["vuln",vuln],["ev",ev],["raw",replay]].concat(showProbe?[["probe",""]]:[]).map(([k,c])=>
@@ -193,7 +172,7 @@ function renderProbeList(box){
         (a.location?` <span class="muted">→ ${esc(a.location)}</span>`:"")+
         (a.server?` <span class="tag t-kind">${esc(a.server)}</span>`:"")+
         `</td><td class="muted">${esc((a.ctype||"").split(";")[0]||"—")}</td>`+
-        `<td class="muted" title="${esc(r.source||"")}">${(r.created_at||"").slice(0,16)} · ${esc((r.source||"").slice(0,26))}</td></tr>`;}).join("")+
+        `<td class="muted" title="${esc(r.source||"")}">${fmtTime(r.created_at)} · ${esc((r.source||"").slice(0,26))}</td></tr>`;}).join("")+
     `</table>`+(rows.length>400?`<div class="muted">仅显示前 400 条（共 ${rows.length}），请用过滤条件收窄</div>`:"")
     :`<span class='muted'>无匹配探测观测（该 host 尚未做过目录扫描入库，或全被过滤条件挡住）</span>`;
 }
@@ -277,11 +256,11 @@ function renderProbeDetail(){
       (a.location?`<span class="muted">→ ${esc(a.location)}</span>`:"")+
       `<span class="muted">len ${esc(a.len||"—")}</span><span class="muted">${esc((a.ctype||"").split(";")[0]||"—")}</span>`+
       (a.server?`<span class="tag t-kind">${esc(a.server)}</span>`:"")+
-      `<span class="muted">最新 ${(it.latest.created_at||"").slice(0,16)} · ${esc((it.latest.source||"").slice(0,44))}</span></div>`+
+      `<span class="muted">最新 ${fmtTime(it.latest.created_at)} · ${esc((it.latest.source||"").slice(0,44))}</span></div>`+
       (it.hist.length?`<div class="pd-h">历史轮次（${it.hist.length}）</div>`+it.hist.map(h=>{const ha=h.attrs||{};
         return `<div class="pd-line"><span class="pstat p-${probeGroup(ha.status)}">${esc(ha.status||"—")}</span>`+
         (ha.location?`<span class="muted">→ ${esc(ha.location)}</span>`:"")+
-        `<span class="muted">len ${esc(ha.len||"—")}</span><span class="muted">${(h.created_at||"").slice(0,16)} · ${esc((h.source||"").slice(0,44))}</span></div>`;}).join("")
+        `<span class="muted">len ${esc(ha.len||"—")}</span><span class="muted">${fmtTime(h.created_at)} · ${esc((h.source||"").slice(0,44))}</span></div>`;}).join("")
       :`<div class="muted" style="margin-top:6px">仅一轮观测</div>`);
   }else if(type==="dir"){
     let node=probeBuildTree(all),ok=true;
@@ -346,13 +325,25 @@ $("#asset-detail").addEventListener("input",e=>{
 });
 const treeExpKey=()=>"pttree:"+PROJECT;
 function saveTreeExp(){try{sessionStorage.setItem(treeExpKey(),JSON.stringify(TREE.expanded))}catch(e){}}
+// 树区可见性（路线 A · 树扶正为默认视野，Burp 式树为主导航）：HTML 带 open 默认展开；
+// 用户手动折叠/展开后本会话记住（跨项目共用一个偏好键，与展开态的 per-project 键区分）
+(function initTreeBox(){
+  const b=$("#asset-tree-box");if(!b)return;
+  try{const s=sessionStorage.getItem("pttree:boxopen");if(s!==null)b.open=s==="1";}catch(e){}
+  b.addEventListener("toggle",()=>{try{sessionStorage.setItem("pttree:boxopen",b.open?"1":"0")}catch(e){}});
+})();
 // 展开/折叠全部：遍历平铺索引，对所有有子节点的节点改写展开记录并持久化（过滤态不受影响，渲染时仍全展开）
 function expandAllTree(){Object.values(TREE.index).forEach(n=>{if(n.children.length)TREE.expanded[n.id]=true});saveTreeExp();renderAssetTree();}
 function collapseAllTree(){Object.values(TREE.index).forEach(n=>{if(n.children.length)TREE.expanded[n.id]=false});saveTreeExp();renderAssetTree();}
-function treeFilter(){TREE.q=$("#tree-q").value.trim().toLowerCase();TREE.hideStale=$("#tree-hidestale").checked;renderAssetTree();}
-const epLabel=k=>{if(k.startsWith("?"))return k.slice(1);const i=k.indexOf("/");return i>=0?k.slice(i):k};
+function treeFilter(){TREE.q=$("#tree-q").value.trim().toLowerCase();TREE.hideStale=$("#tree-hidestale").checked;TREE.vulnOnly=$("#tree-vulnonly").checked;renderAssetTree();}
+// endpoint 树叶子 label=纯末段名（无首/尾斜杠）：树里 xxx/ 后缀专属 group 目录节点（文件管理器惯例，
+// 消除「/ftp/ 像目录点不开」的双语义误导）；完整 URL 在 title 悬停与 ⧉ 复制；数据层已归并尾斜杠（aliases 留痕）
+const epLabel=k=>{if(k.startsWith("?"))k=k.slice(1);
+  const i=k.indexOf("/");if(i<0)return k||"/";
+  const segs=k.slice(i+1).split("/").filter(Boolean);
+  return segs.length?segs[segs.length-1]:"/";};
 function mkNode(atype,akey,asset,synth){
-  return {id:atype+"/"+akey,atype,akey,asset:asset||null,synth:!!synth,parent:null,children:[],count:0,vuln:0,
+  return {id:atype+"/"+akey,atype,akey,asset:asset||null,synth:!!synth,parent:null,children:[],count:0,vuln:0,maxSev:"",vItems:[],
     label:atype==="endpoint"?epLabel(akey):akey,
     title:synth?akey+"（合成根，非库内资产）":akey};
 }
@@ -364,19 +355,30 @@ async function loadAssetTree(){
     // 漏洞角标统计：finding.parent_ext 为逗号分隔的观测事件 id 串（数字段才有效），
     // 按「观测事件 id → 漏洞条数」累计；资产由观测归并而成（assets.event_ids），
     // buildAssetTree 内再经 event_ids 映射到资产并向上汇总到子树
-    const vulnMap={};
+    // P0b：同时记每条漏洞的严重度+标题（悬停 top 列表 & 徽标按最高严重度着色）
+    const vulnMap={},vulnInfo={};
     (f.findings||[]).forEach(x=>{
       String(x.parent_ext||"").split(",").forEach(t=>{
         const s=t.trim();
-        if(/^\d+$/.test(s))vulnMap[+s]=(vulnMap[+s]||0)+1;
+        if(/^\d+$/.test(s)){vulnMap[+s]=(vulnMap[+s]||0)+1;
+          (vulnInfo[+s]=vulnInfo[+s]||[]).push({sev:x.severity||"",title:x.title||x.value||("#"+x.id)});}
       });
     });
-    buildAssetTree(d.assets||[],vulnMap);
+    buildAssetTree(d.assets||[],vulnMap,vulnInfo);
+    // D3 归因孤儿显式化：finding 归因事件无一命中资产树（归因缺失/事件未归并）→ 此前静默不可见，
+    // 树顶部出警示行（rejected 不算漏洞；osint 是情报不拦）——post-ch 3 条密钥泄露即此类
+    TREE.orphans=(f.findings||[]).filter(x=>{
+      if(x.kind!=="finding"||x.status==="rejected")return false;
+      const evs=String(x.parent_ext||"").split(",").map(s=>s.trim()).filter(s=>/^\d+$/.test(s)).map(Number);
+      return evs.length===0||!evs.some(e=>TREE.evNode[e]);
+    }).length;
     syncTreeSel();
     renderAssetTree();
+    // 批次 2 去表：树缓存重建后由 syncTreeSel 统一恢复选中态并重渲染详情（原表格补刷已随表删除）
   }catch(e){$("#asset-tree").innerHTML="<span class='muted'>资产树加载失败："+esc(e.message)+"</span>";}
 }
-function buildAssetTree(assets,vulnMap){
+function buildAssetTree(assets,vulnMap,vulnInfo){
+  vulnInfo=vulnInfo||{};
   const doms=assets.filter(a=>a.atype==="domain"),hosts=assets.filter(a=>a.atype==="host"),
     svcs=assets.filter(a=>a.atype==="service"),eps=assets.filter(a=>a.atype==="endpoint");
   const domSet=new Set(doms.map(a=>a.akey)),dnodes={},roots=[],regRoots={};
@@ -429,13 +431,18 @@ function buildAssetTree(assets,vulnMap){
       if(segs.length>1)n.label=segs[segs.length-1];
     }else{orph.children.push(n);n.parent="__orphan";}});
   if(orph.children.length)roots.push(orph);
-  // 子树资产计数徽标 + 漏洞红色角标 + 平铺索引（供锚定/展开定位）
-  const idx={};
-  const cnt=n=>{let s=n.synth?0:1,v=0;
+  // 子树资产计数徽标 + 漏洞角标（计数+最高严重度+条目清单，悬停 top 列表）+ 平铺索引（供锚定/展开定位）
+  // evNode：观测事件 id → 树节点 id，供发现页漏洞反向定位到树（P1a）
+  const idx={},evNode={};
+  const cnt=n=>{let s=n.synth?0:1,v=0,ms="";
     // 自身漏洞：经 event_ids（构成该资产的观测事件）查 vulnMap 累计；合成节点无资产则为 0
-    if(!n.synth&&n.asset)(n.asset.event_ids||[]).forEach(e=>{v+=vulnMap[e]||0});
-    n.children.forEach(c=>{s+=cnt(c);v+=c.vuln});
-    n.count=s;n.vuln=v;idx[n.id]=n;return s;};
+    if(!n.synth&&n.asset)(n.asset.event_ids||[]).forEach(e=>{evNode[e]=n.id;
+      v+=vulnMap[e]||0;
+      (vulnInfo[e]||[]).forEach(it=>{n.vItems.push(it);if(SEV_RANK[it.sev]>SEV_RANK[ms])ms=it.sev;});});
+    n.children.forEach(c=>{s+=cnt(c);v+=c.vuln;
+      if(SEV_RANK[c.maxSev]>SEV_RANK[ms])ms=c.maxSev;
+      c.vItems.forEach(it=>n.vItems.push(it));});
+    n.count=s;n.vuln=v;n.maxSev=v?ms:"";idx[n.id]=n;return s;};
   roots.forEach(cnt);
   // 两级排序：目录节点（有子节点）排前、叶子排后，同级内再按 label 字典序
   const dirKey=n=>n.children.length?0:1;
@@ -446,31 +453,34 @@ function buildAssetTree(assets,vulnMap){
     ||(a.atype==="host"?0:1)-(b.atype==="host"?0:1)
     ||a.label.localeCompare(b.label);
   roots.sort(byRoot);roots.forEach(sortAll);
-  TREE.nodes=roots;TREE.index=idx;
+  TREE.nodes=roots;TREE.index=idx;TREE.evNode=evNode;
 }
 function renderAssetTree(){
   const box=$("#asset-tree");if(!box)return;
   const q=TREE.q;
   const hasFresh=n=>{if(!n.synth&&n.asset)return !n.asset.stale;return n.children.some(hasFresh);};
+  // 三重可见性：搜索命中（自身或子树）/ 非 stale / 有洞（vuln 上卷含子孙，父链天然保留）
   const visible=n=>(!q||n.akey.toLowerCase().includes(q)||n.children.some(visible))
-                &&(!TREE.hideStale||hasFresh(n));
+                &&(!TREE.hideStale||hasFresh(n))
+                &&(!TREE.vulnOnly||n.vuln>0);
   let html="";
+  if(TREE.orphans>0)html+=`<div class="torphan" data-gofind="1" title="这些漏洞的归因没有落到任何资产（归因缺失或观测事件未归并），树和表都看不到——点击去发现页处理">⚠ ${TREE.orphans} 条漏洞未关联到资产树</div>`;
   (function walk(nodes,depth){
     nodes.forEach(n=>{
       if(!visible(n))return;
-      const open=q||TREE.hideStale?true:(TREE.expanded[n.id]!==undefined?TREE.expanded[n.id]:depth<=1); // 默认展开到第 2 层（根+二级目录）；过滤态全展开
+      const open=(q||TREE.hideStale||TREE.vulnOnly)?true:(TREE.expanded[n.id]!==undefined?TREE.expanded[n.id]:depth<=1); // 默认展开到第 2 层（根+二级目录）；过滤态全展开
       const staleCls=hasFresh(n)?"":" tstale"; // 子树全部 30 天未见 → 灰显
       html+=`<div class="tnode${staleCls} ${TREE.sel===n.id?"on":""}" data-tid="${esc(n.id)}" style="padding-left:${depth*14+4}px" title="${esc(n.title)}">`+
         (n.children.length?`<span class="tcaret" data-caret="${esc(n.id)}">${open?"▾":"▸"}</span>`:`<span class="tcaret tleaf">·</span>`)+
         `<span class="tdot d-${n.atype}"></span><span class="tlabel">${esc(n.label)}</span>`+
         (n.count>1?`<span class="tcount">${n.count}</span>`:"")+
-        (n.vuln>0?`<span class="tvuln" title="子树关联漏洞 ${n.vuln} 条">${n.vuln}</span>`:"")+
+        (n.vuln>0?`<span class="tvuln v-${n.maxSev||"none"}" title="${esc(vulnHoverTitle(n))}">${n.vuln}</span>`:"")+
         (n.akey&&!n.akey.startsWith("?")?`<span class="tcopy" data-copy="${esc(n.akey)}" title="复制完整地址">⧉</span>`:"")+
         `</div>`;
       if(open&&n.children.length)walk(n.children,depth+1);
     });
   })(TREE.nodes,0);
-  box.innerHTML=html||`<span class='muted'>${(q||TREE.hideStale)?"无匹配节点":"暂无资产（rebuild-assets 后出现）"}</span>`;
+  box.innerHTML=html||`<span class='muted'>${(q||TREE.hideStale||TREE.vulnOnly)?"无匹配节点":"暂无资产（rebuild-assets 后出现）"}</span>`;
 }
 function subtreeSet(n){const s=new Set();(function w(x){if(!x.synth)s.add(x.id);x.children.forEach(w)})(n);return s;}
 function selectTreeNode(id){
@@ -479,24 +489,48 @@ function selectTreeNode(id){
   let cur=n.parent;while(cur&&TREE.index[cur]){TREE.expanded[cur]=true;cur=TREE.index[cur].parent;}
   saveTreeExp();
   renderAssetTree();
-  $("#tree-sel-txt").innerHTML=`树选中：<b>${esc(n.label)}</b>（子树 ${TREE.selSet.size} 条）`;
+  $("#tree-sel-txt").innerHTML=`树选中：<b>${esc(n.label)}</b>（子树 ${TREE.selSet.size} 条资产 · 漏洞 ${n.vuln} 条）`;
   $("#tree-sel-bar").classList.remove("hidden");
-  loadAssets();
+  // 批次 2：点节点=选中+开详情（Burp Site Map 点节点看请求）——实体节点走完整详情，目录/合成分组节点走子树汇总
+  if(n.asset){selAsset=id;renderAssetDetail();}
+  else{selAsset=null;renderTreeSummary(n);}
 }
 function clearTreeSel(){
-  TREE.sel=null;TREE.selSet=null;
+  TREE.sel=null;TREE.selSet=null;selAsset=null;
   renderAssetTree();
   $("#tree-sel-bar").classList.add("hidden");
-  loadAssets();
+  $("#asset-detail").className="muted";
+  $("#asset-detail").innerHTML="← 点击左侧树节点查看详情";
 }
-function syncTreeSel(){ // 树缓存重建后：选中节点消失则清锚定并重刷表格，避免残留过期子树过滤
-  if(!TREE.sel)return;
+function assetDetailPlaceholder(){$("#asset-detail").className="muted";$("#asset-detail").innerHTML="← 点击左侧树节点查看详情";}
+function syncTreeSel(){ // 树缓存重建后（项目切换/重拉）：选中节点消失则清锚定并复位详情，否则恢复子树集合并重渲染
+  if(!TREE.sel){if(selAsset){selAsset=null;assetDetailPlaceholder();}return;}
   const n=TREE.index[TREE.sel];
-  if(!n){TREE.sel=null;TREE.selSet=null;$("#tree-sel-bar").classList.add("hidden");loadAssets();return;}
+  if(!n){TREE.sel=null;TREE.selSet=null;selAsset=null;
+    $("#tree-sel-bar").classList.add("hidden");assetDetailPlaceholder();return;}
   TREE.selSet=subtreeSet(n);
-  $("#tree-sel-txt").innerHTML=`树选中：<b>${esc(n.label)}</b>（子树 ${TREE.selSet.size} 条）`;
+  $("#tree-sel-txt").innerHTML=`树选中：<b>${esc(n.label)}</b>（子树 ${TREE.selSet.size} 条资产 · 漏洞 ${n.vuln} 条）`;
+  if(n.asset){selAsset=TREE.sel;renderAssetDetail();}
+  else{selAsset=null;renderTreeSummary(n);}
+}
+// 目录/合成分组节点（仅展示态，无库内资产）：右栏出子树汇总（计数上卷 + 漏洞按严重度分组），
+// 与实体详情同位渲染——分组节点也能「点开看东西」，消除「目录点不开内容」的断头体验
+function renderTreeSummary(n){
+  const box=$("#asset-detail");box.className="";
+  const order=SEVS.map(s=>s[0]);
+  const bySev={};(n.vItems||[]).forEach(it=>{(bySev[it.sev||""]=(bySev[it.sev||""]||[])).push(it)});
+  const groups=order.filter(s=>bySev[s]).map(s=>
+    `<div class="ad-sev"><span class="tag sev-${s||"none"}">${sevLabel(s)} × ${bySev[s].length}</span>`+
+    bySev[s].map(it=>`<div class="rec"><div class="hd"><b>${esc(it.title)}</b></div></div>`).join("")+`</div>`).join("");
+  box.innerHTML=`<div class="muted" style="margin-bottom:6px"><b>${esc(n.akey||n.label)}</b> ｜ 路径分组（仅展示态，非库内资产）</div>`+
+    `<div class="ad-h">子树汇总</div>`+
+    `<div>子树资产 <b>${n.count}</b> 条 ｜ 漏洞 <b>${n.vuln}</b> 条${n.vuln?`（最高 ${sevLabel(n.maxSev)}）`:""}</div>`+
+    (groups?`<div class="ad-h">子树漏洞（上卷口径；精确归因请下钻端点详情）</div>`+groups:
+      `<div class="ad-h">子树漏洞</div><span class="muted">无</span>`);
 }
 $("#asset-tree").addEventListener("click",e=>{
+  const gf=e.target.closest("[data-gofind]");
+  if(gf){switchTab("findings");return;}  // D3：孤儿提示 → 发现页处理归因
   const cp=e.target.closest("[data-copy]");
   if(cp){e.stopPropagation();navigator.clipboard.writeText(cp.dataset.copy)
     .then(()=>{const t=cp.textContent;cp.textContent="✓";setTimeout(()=>cp.textContent=t,900)})
@@ -504,5 +538,5 @@ $("#asset-tree").addEventListener("click",e=>{
   const c=e.target.closest("[data-caret]");
   if(c){const id=c.dataset.caret;TREE.expanded[id]=c.textContent.trim()==="▾"?false:true;saveTreeExp();renderAssetTree();return;}
   const tn=e.target.closest(".tnode");if(!tn)return;
-  if(TREE.sel===tn.dataset.tid)clearTreeSel();else selectTreeNode(tn.dataset.tid);
+  selectTreeNode(tn.dataset.tid);  // 批次 2：点节点=选中+开详情；取消锚定走 ✕ 清除按钮（不再同节点点两次切换）
 });

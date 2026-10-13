@@ -26,7 +26,7 @@ async function boot(){
   $("#m-kind").onchange=()=>$("#m-sev").classList.toggle("hidden",$("#m-kind").value!=="finding");
   loadAll();
 }
-function loadAll(){loadOverview();loadFindings();loadAssetTree();loadAssets();loadTimeline();loadReview();loadReport()}
+function loadAll(){loadOverview();loadFindings();loadAssetTree();loadTimeline();loadReview();loadReport()}  // 批次 2 去表：资产视图只剩树+详情
 
 async function manualAdd(){
   const kind=$("#m-kind").value;
@@ -42,7 +42,7 @@ async function manualAdd(){
     msg.style.color="var(--teal)";
     msg.textContent=`已入库 ✓ #${d.id||""} ${body.kind} ${body.value}（origin=human，自动 confirmed）`;
     $("#m-value").value="";$("#m-note").value="";
-    loadOverview();loadAssets();loadFindings();loadLint();
+    loadOverview();loadAssetTree();loadFindings();loadLint();  // 批次 2：补录后重拉资产树（新实体随 rebuild 上树，点节点看详情）
   }catch(e){
     msg.style.color="var(--red)";
     msg.textContent="入库失败："+e.message;
@@ -53,6 +53,8 @@ function tag(s){return `<span class="tag t-${s}">${s}</span>`}
 function kindTag(k){return `<span class="tag t-kind">${k}</span>`}
 function scopeTag(s){s=s||"unknown";return `<span class="tag scp-${s}">${s==="in"?"in-scope":(s==="out"?"OUT":"scope?")}</span>`}
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+// 时间统一显示格式（2026-10-13 定稿）：ISO 带时区串 → 「YYYY-MM-DD HH:MM:SS」；非时间串原样返回。悬停兜底由调用点 title 属性给原始 ISO
+function fmtTime(iso){const m=String(iso||"").match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(:\d{2})?/);return m?m[1]+" "+m[2]+(m[3]||":00"):(iso||"")}
 
 async function loadOverview(){
   const d=await api("overview",{project:PROJECT});
@@ -63,7 +65,7 @@ async function loadOverview(){
     const body=(r.note&&r.note.trim())?r.note:(r.detail||"");
     const isPlan=/【(已做|结论|下一步)】/.test(body);
     return `<div class="fitem"><b>${esc(r.title||"建议")}</b> ${tag(r.status)} `+
-    `<span class="muted">#${r.id} · ${r.created_at} · ${r.origin}</span>`+
+    `<span class="muted">#${r.id} · ${fmtTime(r.created_at)} · ${r.origin}</span>`+
     (isPlan
       ?`<div class="detail" style="margin-top:4px">${suggestDigest(body)}</div>`+
        `<details style="margin-top:4px"><summary class="muted" style="cursor:pointer">展开完整计划（已做 / 结论 / 下一步）</summary>`+
@@ -71,7 +73,11 @@ async function loadOverview(){
       :(r.value?`<div class="detail">${esc(r.value)}</div>`:"")+
        (r.note?`<div class="muted">依据：${esc(r.note)}</div>`:""))+
     `<div class="src">来源：${esc(r.source)}</div>`+
-    (r.status==="new"?`<div><button class="btn-ok" title="采纳：该计划成为报告「复测计划」节引用的唯一最新计划" onclick="doReview(${r.id},'confirmed')">采纳</button> <button class="btn-no" title="忽略：报告将没有复测计划节，下次批次再出新计划可替代" onclick="doReview(${r.id},'rejected')">忽略</button></div>`:"")+
+    // 决策入口唯一（一个对象一个决策点）：总览卡只导航，采纳/忽略在待审队列页——
+    // 此前两处都能完整决策，用户不知道该在哪审
+    (r.status==="new"
+      ?`<div><button class="mini" title="这条建议的去留决定在待审队列页统一做（与复测结论同一收件箱）" onclick="switchTab('review')">去队列处理</button></div>`
+      :"")+
     `</div>`;}).join("")||"<div class='muted'>暂无建议（AI 在采集/测试批次结束后生成）</div>";
   const st=d.by_status||{}, bk=d.by_kind||{};
   const card=(n,label,attrs)=>n>0
@@ -79,7 +85,7 @@ async function loadOverview(){
     :`<div class="card"><b>${n}</b><span>${label}</span></div>`;
   $("#stat-cards").innerHTML=
     card((st.new||0)+(st.confirmed||0)+(st.rejected||0),"事件总数",'data-tab="assets"')+
-    card(st.confirmed||0,"已确认",'data-tab="assets" data-status="confirmed"')+
+    card(st.confirmed||0,"已确认",'data-tab="assets"')+
     card(st.new||0,"待审核",'data-tab="review"')+
     card(bk.domain||0,"域名/子域",'data-tab="assets" data-kind="domain"')+
     card((bk.finding||0)+(bk.osint||0),"发现/情报",'data-tab="findings"')+
@@ -88,7 +94,7 @@ async function loadOverview(){
   $("#stat-cards").onclick=e=>{
     const c=e.target.closest(".card[data-tab]");
     if(!c)return;
-    if(c.dataset.tab==="assets")gotoAssets(c.dataset.kind||"",c.dataset.status||"",c.dataset.q||"");
+    if(c.dataset.tab==="assets")gotoAssets(c.dataset.kind||"",c.dataset.q||"");
     else switchTab(c.dataset.tab);
   };
   const groups={};
@@ -98,8 +104,8 @@ async function loadOverview(){
     (groups[base]=groups[base]||[]).push(r);
   });
   $("#domain-groups").innerHTML=Object.keys(groups).sort().map(base=>
-    `<div class="grp"><h4 style="cursor:pointer" title="点击在资产明细中搜索该主域" onclick="gotoAssets('','','${base}')">${base}（${groups[base].length}）</h4><ul>`+
-    groups[base].map(r=>`<li style="cursor:pointer" title="点击在资产明细中搜索" onclick="gotoAssets('','','${r.value}')">${r.value} ${tag(r.status)} ${scopeTag(r.scope)} `+
+    `<div class="grp"><h4 style="cursor:pointer" title="点击在资产树中定位该主域" onclick="gotoAssets('','${base}')">${base}（${groups[base].length}）</h4><ul>`+
+    groups[base].map(r=>`<li style="cursor:pointer" title="点击在资产树中定位" onclick="gotoAssets('','${r.value}')">${r.value} ${tag(r.status)} ${scopeTag(r.scope)} `+
       `${r.tech?`<span class="tag t-kind">${esc(r.tech)}</span>`:""} `+
       `${r.note?`<span class="muted">— ${esc(r.note)}</span>`:""}</li>`).join("")+
     `</ul></div>`).join("");
@@ -114,10 +120,21 @@ let ASSET_MAP = {};
 let TESTS=[];
 let selAsset=null;
 // ===== 资产树（左树右表）：单独拉全量资产，项目切换/loadAll 时刷新缓存 =====
-const TREE={nodes:[],index:{},expanded:{},sel:null,selSet:null,q:"",hideStale:false};
+const TREE={nodes:[],index:{},evNode:{},expanded:{},sel:null,selSet:null,q:"",hideStale:false,vulnOnly:false};
 function gotoQueueDetail(id){
   const d=document.querySelector(`#review-table tr.rv-detail[data-did="${id}"]`); if(!d)return;
-  gotoAssets(d.dataset.kind||"","",d.dataset.q||"");
+  const kind=d.dataset.kind||"";
+  // test 不是资产实体：资产页按实体 key 过滤，搜 test value 恒 0 条（跳过去=空页面）——
+  // 改跳母发现详情（复测包/证据链渲染该 finding 及其全部子 test 的报文证据）
+  if(kind==="test"){
+    const pid=d.dataset.pid||"";
+    if(pid){gotoFinding(+pid);return;}
+    alert("这条复测没有可解析的母发现（parent_ext 非数字 id 或指向非 finding）：\n"+
+          "报文/证据无处可靠渲染——请先修正归因，或驳回这条复测");
+    return;
+  }
+  if(kind==="suggestion")return;  // 批次计划全文在判据卡展示，无独立详情页
+  gotoAssets(kind,d.dataset.q||"");
 }
 function gotoFindingsPending(){
   findStatus="new";$("#f-find-status").value="new";
@@ -131,16 +148,21 @@ function switchTab(v){
   if(v==="report")loadLint(); // Lint 门禁迁报告·收尾页：进页即查，不再随 loadAll 每次全量跑
   if(v==="explore")loadExplore(); // 探索·计划页：进页即拉（只读视图，写走 CLI）
 }
-function gotoAssets(kind,status,q){
+function gotoAssets(kind,q){
+  // 批次 2 去表后的深链语义：key 命中树节点 → 直接锚定+开详情；未命中 → 降级树搜索（VS Code 式：导航优先，搜索兜底）
   const MAP={domain:"domain",port:"service",path:"endpoint",param:"endpoint",
              host:"host",service:"service",endpoint:"endpoint"};
-  $("#f-atype").value=(kind&&MAP[kind])||"";
-  $("#f-status").value=status==="new"?"pending":(status||"");
-  $("#f-q").value=q||"";
-  // 深链跳转语义=按过滤看全量，清掉树锚定避免被子树过滤叠加
-  TREE.sel=null;TREE.selSet=null;
-  $("#tree-sel-bar").classList.add("hidden");
-  renderAssetTree();
   switchTab("assets");
-  loadAssets();
+  q=(q||"").trim();
+  let hit=null;
+  if(q){
+    const t=kind&&MAP[kind];
+    if(t&&TREE.index[t+"/"+q])hit=TREE.index[t+"/"+q];       // 带类型精确命中
+    if(!hit){const k=q.toLowerCase();
+      hit=Object.values(TREE.index).find(n=>!n.synth&&n.asset&&n.akey&&n.akey.toLowerCase()===k);}  // 全索引按 key 精确兜底
+  }
+  if(hit){selectTreeNode(hit.id);return;}
+  if(TREE.sel)clearTreeSel();  // 未命中换目标：清旧锚定，避免旧子树选中态叠加新搜索
+  $("#tree-q").value=q;
+  treeFilter();
 }

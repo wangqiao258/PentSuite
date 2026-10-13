@@ -1,5 +1,6 @@
 // PentDB 面板 · 发现·漏洞视图：列表/筛选/详情复测工作台/证据链（事件委托）
 let DEDUP_MAP={};  // dedup_key -> 该指纹下 finding 条数（列表打「同指纹」标用，loadFindings 刷新）
+let lastFindings=[];  // 最近一次 loadFindings 的全量记录（批量豁免、资产树反向定位按 id 取记录用；修复此前 doWaiveBatch 引用悬空=批量按钮恒空操作）
 let wvOnly=false;  // 「待豁免」筛选：只看有起草态豁免的记录（收尾决定跟随记录上下文）
 function lastRetest(fid){
   const fids=new Set([String(fid)]);
@@ -21,8 +22,7 @@ const frow=r=>{
     `<div class="muted" style="font-size:12px;margin-top:2px">`+
     (tgt?esc(tgt)+" · ":"")+
     (t?`最近复测：${esc((t.note||t.value||"").slice(0,40))} · `:"")+
-    `${(r.created_at||"").slice(0,10)}</div>`+
-    (pend?`<div style="margin-top:4px" onclick="event.stopPropagation()"><button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认</button> <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button></div>`:"")+
+    `${fmtTime(r.created_at)}</div>`+
     `</div>`;
 };
 function targetHtml(r){
@@ -89,32 +89,61 @@ function findingDetail(r){
     (prof||(!secs.length?`<h4>描述 / 复测结论</h4><div style="white-space:pre-wrap">${esc(r.detail||"")}</div>`:""))+
     (r.note?`<h4>结论备注</h4><div style="white-space:pre-wrap">${esc(r.note)}</div>`:"")+
     `<h4>来源</h4><div class="src">${esc(r.source)}</div>`+
-    `<div class="muted" style="margin-top:8px">${(r.created_at||"")} · scope=${esc(r.scope||"unknown")}`+
+    `<div class="muted" style="margin-top:8px">${fmtTime(r.created_at)} · scope=${esc(r.scope||"unknown")}`+
     (r.dedup_key?` · 指纹 ${esc(r.dedup_key)}`:"")+"</div>";
   const life=lifeOf(r);
-  // 记录处置区（单轴顺序，对齐成熟产品：有效性先定，风险接受是确认后的分支）：
-  // 待审→确认采纳/驳回；确认后缺证据→豁免(won't fix)；驳回=终态 lint 已跳过；作废=数据卫生正交
+  // 记录处置区（单轴顺序，对齐成熟产品：先定是不是漏洞，风险接受是确认后的分支）：
+  // 待审→确认是漏洞/驳回（批注必填，人审唯一入口=详情卡；列表只读）；
+  // 其下有待审复测结论时提供父子继承（一次决定覆盖一组，默认勾选可取消，逐条留痕）；
+  // 确认后缺证据→起草豁免；驳回=结案 lint 已跳过；作废=数据清理（第二行右对齐+场景问句，
+  // 与决策对分离；危险轻量：红描边+可撤销徽标，强制 reason+二次确认，void --undo 可逆）
+  // 文案规范：一句一事，说人话（不用 正交/终态/lint/留痕；原因写全，不让用户记前缀格式）
   const act=[];
   const noEv=r.kind==="finding"?r.no_pkt:r.no_ev;
-  if(r.status==="new")act.push(`<button class="btn-ok" onclick="doReview(${r.id},'confirmed')">确认采纳</button>`+
-    ` <button class="btn-no" onclick="doReview(${r.id},'rejected')">驳回</button>`);
+  // 待审子复测（B：父子继承——一次决定覆盖一组，默认勾选可取消，逐条留痕）
+  const relNew=isFinding?rel.filter(t=>t.status==="new"):[];
+  const relConf=rel.filter(t=>t.status==="confirmed").length;
+  if(isFinding&&relConf>0)act.push(`<span class="tag t-confirmed" title="该发现下已有人审采信的复测结论">复测证据已齐（${relConf} 条采信）</span>`);
+  if(r.status==="new")act.push(
+    `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;width:100%">`+
+    `<input id="rv-note" placeholder="批注（必填）：确认写采纳理由；驳回写原因" style="flex:1;min-width:240px">`+
+    `<button class="btn-ok" title="${isFinding?"确认是漏洞。批注必填，之后进入报告。":"确认这条记录。批注必填，之后进入报告。"}" onclick="doCascadeReview(${r.id},'confirmed')">${isFinding?"确认是漏洞":"确认"}</button>`+
+    ` <button class="btn-no" title="${isFinding?"确认不是漏洞，结案。批注开头写：误报、越界、无法复现或重复。":"驳回。批注开头写：误报、越界、无法复现或重复。"}" onclick="doCascadeReview(${r.id},'rejected')">驳回</button></div>`+
+    (relNew.length?
+      `<div style="width:100%;margin-top:4px;padding:6px 8px;border:1px dashed #888780;border-radius:6px">`+
+      `<label style="display:block"><input type="checkbox" checked onchange="cascadeToggleAll(this.checked)"> `+
+      `<b>其下 ${relNew.length} 条待审复测结论随本决定一并处置</b>（默认全选，可取消勾选）</label>`+
+      `<div class="muted" style="font-size:12px;margin:3px 0">父子继承：一次决定覆盖一组，每条仍逐条留痕；复测结论的独立审核入口在待审队列页</div>`+
+      relNew.map(t=>`<label style="display:block;font-size:12px"><input type="checkbox" class="cascade-t" data-tid="${t.id}" checked> `+
+        `#${t.id} ${esc((t.note||t.value||"").slice(0,70))}</label>`).join("")+
+      `</div>`:
+      `<div class="muted" style="font-size:11px;width:100%">${isFinding?"这条漏洞记录的处置（复测结论的审核在待审队列页）":"这条记录的处置"}</div>`));
   if(r.status==="confirmed"&&noEv){
     if(r.wv)act.push(`<span class="tag sev-med">豁免待确认 wid=${r.wv.id}（${esc(r.wv.term)}）</span>`+
       ` <button class="btn-ok" onclick="doWaiveRec('confirm',${r.wv.id})">确认豁免</button>`+
       ` <button class="btn-no" onclick="doWaiveRec('reject',${r.wv.id})">作废豁免</button>`);
-    else act.push(`<button class="mini" onclick="doDraftWaive(${r.id})" title="记录有效但证据取不回时，起草豁免待人确认（AI 只能起草）">起草豁免</button>`);
+    else act.push(`<button class="mini" onclick="doDraftWaive(${r.id})" title="记录有效但证据还没取回？先起草，人工确认后不挡报告。">起草豁免</button>`);
   }
-  act.push(`<button class="mini" onclick="doVoidRec(${r.id})" title="误录/冗余数据清理：作废记录退出 lint/报告/面板（留痕可 --undo 恢复）">作废记录</button>`);
+  act.push(`<div style="display:flex;align-items:center;gap:8px;width:100%">`+
+    `<span class="muted" style="font-size:11px">这条记录录错了？</span><span style="flex:1"></span>`+
+    `<button class="btn-void" onclick="doVoidRec(${r.id})" `+
+    `title="记录录错或重复才用作废。之后不进报告和统计，可以在作废列表里恢复。">作废记录<span class="ub">可撤销</span></button></div>`);
   const actHtml=`<div class="rec" style="margin:8px 0">`+
-    `<div class="hd" style="flex-wrap:wrap;gap:6px;align-items:center">${act.join("")}</div>`+
-    `<div class="muted" style="font-size:12px;margin-top:4px">先定有效性：确认采纳=进报告 ｜ 驳回=非漏洞（终态，lint 直接跳过）｜ 确认后缺证据 → 豁免（won't fix）或补证据 ｜ 作废=误录/冗余，退出一切视图</div></div>`;
-  const lifeSel=isFinding?`<select id="life-quick" class="mini" onchange="setLife(${r.id},this.value)" title="快捷改生命周期（写 changelog 留痕）">`+
+    `<div class="hd" style="flex-wrap:wrap;gap:6px;align-items:center">${act.join("")}</div></div>`;
+  const lifeSel=isFinding?`<select id="life-quick" class="mini" onchange="setLife(${r.id},this.value)" title="快捷改生命周期（改动会记入操作日志）">`+
     (life?"":`<option value="">生命周期?</option>`)+
     LIFES.map(([k,label])=>`<option value="${k}" ${life===k?"selected":""}>${label}</option>`).join("")+`</select>`:"";
+  // P1a：资产树反向定位——归因事件归并到资产树节点才可定位；归因孤儿（如仅挂 osint 事件）给禁用态+原因
+  const locEv=(r.parent_ext||"").split(",").map(s=>s.trim()).filter(s=>/^\d+$/.test(s));
+  const locatable=locEv.some(e=>TREE.evNode&&TREE.evNode[+e]);
   let html=`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">`+
     `<span class="tag sev-${r.severity||"none"}">${sevLabel(r.severity)}</span>`+
     `<b style="font-size:15px">${esc(r.title||r.value)}</b> ${lifeSel} ${tag(r.status)} ${kindTag(r.kind)}`+
-    `${r.ext_id?` <span class="muted">${esc(r.ext_id)}</span>`:""}<span style="flex:1"></span>`+
+    `${r.ext_id?` <span class="muted">${esc(r.ext_id)}</span>`:""}`+
+    (locEv.length?(locatable
+      ?`<button class="mini" data-loctree="${r.id}" title="跳到资产明细：树展开定位到归因实体并锚定子树，右表选中该行">资产树定位</button>`
+      :`<button class="mini" disabled title="归因事件未归并到任何资产（树上不可见）——需先补挂归因或 rebuild-assets">资产树定位</button>`):"")+
+    `<span style="flex:1"></span>`+
     `<span class="muted">#${r.id} · ${r.origin}${r.confidence?"/"+r.confidence:""}</span></div>`+
     actHtml;
   if(isFinding){
@@ -122,7 +151,7 @@ function findingDetail(r){
       `<span class="fd-tab ${findTab===k?"on":""}" data-tab="${k}">${label}${k==="timeline"?`（${rel.length}）`:""}</span>`).join("")}</div>`;
     const timeline=rel.length?rel.map(t=>
       `<div class="rec"><div class="hd"><b>${esc(t.value)}</b> ${tag(t.status)}`+
-      `<span style="flex:1"></span><span class="muted">${(t.created_at||"").slice(0,16)}</span></div>`+
+      `<span style="flex:1"></span><span class="muted">${fmtTime(t.created_at)}</span></div>`+
       (t.note?`<div class="muted" style="margin-top:2px">结论: ${esc(t.note)}</div>`:"")+
       `<div class="src">归因: ${t.parent_ext?esc(t.parent_ext):"—"} ｜ 来源: ${esc(t.source)}</div></div>`).join("")
       :"<span class='muted'>暂无复测记录（「登记复测」页签登记第一轮；value=动作 · note=结论）</span>";
@@ -156,11 +185,35 @@ async function setLife(fid,code){
   if(!r.ok){alert("生命周期更新失败："+await r.text());return;}
   loadFindings();
 }
+// 父子继承级联开关（B）：全选/清空其下待审复测勾选
+function cascadeToggleAll(on){
+  document.querySelectorAll("#finding-detail input.cascade-t").forEach(c=>c.checked=on);
+}
+// 级联处置（B）：确认/驳回漏洞记录 + 勾选的待审复测结论一并处置（逐条留痕，changelog 标注级联来源）
+async function doCascadeReview(fid,action){
+  const note=((document.getElementById("rv-note")||{}).value||"").trim();
+  if(!note){alert("人审必须填批注（会记到操作日志，不能空着盖章）");return;}
+  const tids=[...document.querySelectorAll("#finding-detail input.cascade-t:checked")].map(c=>+c.dataset.tid);
+  const isConf=action==="confirmed";
+  if(tids.length){
+    if(!confirm(isConf
+        ?`确认是漏洞（进报告），并连带采信其下 ${tids.length} 条待审复测结论？`
+        :`确认不是漏洞（结案），并连带驳回其下 ${tids.length} 条待审复测结论？`))
+      return;
+  }
+  const body=tids.length
+    ?{ids:[fid,...tids],action,note,cascade_from:fid}
+    :{id:fid,action,note};
+  const r=await fetch("/api/review",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body)});
+  if(!r.ok){alert("处置失败："+await r.text());return;}
+  loadFindings();
+}
 async function doWaiveRec(kind,wid){
   const verb=kind==="confirm"?"确认":"作废";
   const msg=kind==="confirm"
-    ?`确认豁免 wid=${wid}？\n确认后该条证据缺口不再计入 lint 阻断（人的决定，留痕不可逆）。`
-    :`作废豁免 wid=${wid}？\n作废后该放行草稿终结（留痕），对应证据缺口重新计入 lint 阻断。\n注意：豁免不是记录处置——记录本身仍按其状态处理（待审则还需确认采纳/驳回）。`;
+    ?`确认豁免 wid=${wid}？\n确认后这条证据缺口不再挡住报告。这个决定不可撤销。`
+    :`作废豁免 wid=${wid}？\n作废后这条证据缺口重新挡住报告。\n注意：豁免不是记录处置——记录本身仍按它的状态处理（待审的还要确认采纳或驳回）。`;
   if(!confirm(msg))return;
   const r=await fetch(kind==="confirm"?"/api/waive/confirm":"/api/waive/reject",
     {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:PROJECT,wid})});
@@ -180,7 +233,8 @@ async function doDraftWaive(fid){
   loadFindings();
 }
 async function doVoidRec(fid){
-  const reason=prompt("作废原因（必填：为什么这条记录无效/冗余）：","");
+  if(!confirm("作废这条记录？作废后不再进报告和统计，之后可以在作废列表里恢复。"))return;
+  const reason=prompt("作废原因（必填）：为什么这条记录无效或重复？","");
   if(!reason||!reason.trim())return;
   const r=await fetch("/api/void",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({project:PROJECT,ids:[fid],reason:reason.trim()})});
@@ -194,6 +248,11 @@ function goFindingsWaive(){
   wvOnly=true;
   switchTab("findings");
   loadFindings();
+}
+// 待审队列母发现链接：切到发现页并选中该 finding（平铺+链接模式：审复测结论时看被审对象）
+function gotoFinding(id){
+  selFinding=id;findStatus="";$("#f-find-status").value="";
+  switchTab("findings");loadFindings();
 }
 const evIsPkt=e=>e.etype==="request"||e.etype==="response"||(e.note&&(e.note.startsWith("request")||e.note.startsWith("response")));
 // exec 类证据：cmd_exec 单通道落盘的 .log（note 以 "output" 开头）——经 /api/evidence/packet 只读解析成报文
@@ -259,7 +318,7 @@ async function loadEvidencePanel(f,rel){
       const hdr=g.req||g.resp;
       const reqCls=!g.req?"hidden":"", respCls=(g.req||!g.resp)?"hidden":"";
       return `<div class="pkt-card">`+
-        `<div class="hd"><b>第 ${i+1} 组</b><span class="muted">挂 #${hdr.event_id} · ${hdr.created_at} · sha256 ${(hdr.sha256||"").slice(0,16)}…</span>`+
+        `<div class="hd"><b>第 ${i+1} 组</b><span class="muted">挂 #${hdr.event_id} · ${fmtTime(hdr.created_at)} · sha256 ${(hdr.sha256||"").slice(0,16)}…</span>`+
         `</div>`+
         (g.req&&g.resp?`<div class="pkt-tabs"><span class="pkt-tab on" data-pkt="req">请求</span><span class="pkt-tab" data-pkt="resp">响应</span></div>`:"")+
         `<pre data-side="req" id="pkt-req-${i}" class="${reqCls}">${g.req?"加载中…":"（该组无请求报文）"}</pre>`+
@@ -282,7 +341,7 @@ async function loadEvidencePanel(f,rel){
         ` <span class="tag t-kind">挂 #${e.event_id}</span>`+
         (e.exists?` <button class="mini" data-ev="${e.id}">查看</button>`
                  :` <span class="tag sev-crit">文件缺失</span>`)+
-        `<div class="src" title="${esc(e.path)}">${esc(e.path)} ｜ sha256 ${(e.sha256||"").slice(0,16)}… ｜ ${e.created_at}</div></div>`+
+        `<div class="src" title="${esc(e.path)}">${esc(e.path)} ｜ sha256 ${(e.sha256||"").slice(0,16)}… ｜ ${fmtTime(e.created_at)}</div></div>`+
         `<pre class="hidden" id="evc-${e.id}"></pre></div>`;
     }).join("")
     :`<span class='muted'>报文类证据已移至「复测包」页签；此处放附件物料（截图/凭据表/报告等）</span>`;
@@ -298,7 +357,7 @@ async function loadProjectEvidence(){
     `<div class="rec"><div class="hd"><b>${esc(e.note||e.path.split(/[\\/]/).pop())}</b>`+
     (e.exists?` <button class="mini" data-ev="${e.id}">查看</button>`
              :` <span class="tag sev-crit">文件缺失</span>`)+
-    `<div class="src">${esc(e.path)} ｜ ${e.created_at}</div></div>`+
+    `<div class="src">${esc(e.path)} ｜ ${fmtTime(e.created_at)}</div></div>`+
     `<pre class="hidden" id="evc-${e.id}"></pre></div>`).join("")
   :"暂无项目级物料（凭据表/报告/访问说明用 evidence --event-id 0 挂到项目，不属于单个漏洞）";
 }
@@ -352,6 +411,7 @@ async function loadFindings(){
   ASSET_MAP={}; (ad.events||[]).forEach(a=>{ASSET_MAP[String(a.id)]=a});
   TESTS=td.events||[];
   const all=d.findings||[];
+  lastFindings=all;  // 供批量豁免/资产树定位按 id 反查记录
   DEDUP_MAP={};all.forEach(r=>{if(r.dedup_key)DEDUP_MAP[r.dedup_key]=(DEDUP_MAP[r.dedup_key]||0)+1});
   const q=((($("#f-find-q")||{}).value)||"").trim().toLowerCase();
   const matchQ=r=>!q||[r.title,r.value,r.detail,r.note].some(x=>(x||"").toLowerCase().includes(q));
@@ -363,10 +423,10 @@ async function loadFindings(){
   $("#wv-chip").innerHTML=wvN?`<span class="sev-chip sev-med ${wvOnly?"on":""}" data-wv="1">待豁免 ${wvN}</span>`:"";
   $("#wv-batch").classList.toggle("hidden",!(wvOnly&&wvN));
   if(wvOnly&&wvN)$("#wv-batch").innerHTML=
-    `<span class="muted">批量处理（与逐条同样留痕不可逆）：</span>`+
+    `<span class="muted">批量处理（和逐条一样，不可撤销）：</span>`+
     `<button class="btn-ok" onclick="doWaiveBatch('confirm')">全部确认豁免</button> `+
     `<button class="btn-no" onclick="doWaiveBatch('reject')">全部作废豁免</button>`+
-    `<span class="muted" style="margin-left:8px">确认=放行报告 ｜ 作废=恢复阻断</span>`;
+    `<span class="muted" style="margin-left:8px">确认=不挡报告 ｜ 作废=恢复挡住</span>`;
   const bySev={}; fs.forEach(r=>{(bySev[r.severity||""]=bySev[r.severity||""]||[]).push(r)});
   $("#sev-chips").innerHTML=SEVS.map(([k,label])=>{
     const n=(bySev[k]||[]).length;
@@ -398,7 +458,7 @@ async function doWaiveBatch(kind){
   const ids=(lastFindings||[]).filter(r=>r.wv).map(r=>r.wv.id);
   const verb=kind==="confirm"?"确认":"作废";
   if(!ids.length)return;
-  if(!confirm(`批量${verb}全部 ${ids.length} 条待确认豁免？\n与逐条同样留痕不可逆${kind==="confirm"?"（确认后对应阻断解除）":"（作废后阻断恢复）"}。`))return;
+  if(!confirm(`批量${verb}全部 ${ids.length} 条待确认豁免？\n和逐条处理一样，不可撤销${kind==="confirm"?"（确认后不再挡报告）":"（作废后恢复挡住）"}。`))return;
   const r=await fetch(kind==="confirm"?"/api/waive/confirm":"/api/waive/reject",
     {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:PROJECT,wids:ids})});
   const d=await r.json().catch(()=>({}));
@@ -409,11 +469,22 @@ $("#findings-list").onclick=e=>findingListClick(e);
 $("#osint-list").onclick=e=>findingListClick(e);
 $("#finding-detail").onclick=e=>{
   const q=e.target.closest("[data-q]");
-  if(q)gotoAssets("","",q.dataset.q);
+  if(q)gotoAssets("",q.dataset.q);
+  // P1a：漏洞 → 资产树反向定位（Burp issue→site map 联动）：切资产页、展开祖先链、锚定子树、右表选中该行
+  const lt=e.target.closest("[data-loctree]");
+  if(lt)locateInAssetTree(Number(lt.dataset.loctree));
 };
+function locateInAssetTree(fid){
+  const f=(lastFindings||[]).find(x=>x.id===fid);if(!f)return;
+  const nid=String(f.parent_ext||"").split(",").map(s=>s.trim()).filter(s=>/^\d+$/.test(s))
+    .map(Number).map(e=>TREE.evNode&&TREE.evNode[e]).find(Boolean);
+  if(!nid)return;  // 按钮仅在 locatable 时可点，此处防御
+  switchTab("assets");
+  selectTreeNode(nid);    // 批次 2：锚定树节点并直接开详情（selectTreeNode 内置 selAsset 联动）
+}
 function findingListClick(e){
   const q=e.target.closest("[data-q]");
-  if(q){gotoAssets("","",q.dataset.q);return;}
+  if(q){gotoAssets("",q.dataset.q);return;}
   const row=e.target.closest("[data-fid]");
   if(row){selFinding=(selFinding===+row.dataset.fid)?null:+row.dataset.fid;loadFindings();}
 }

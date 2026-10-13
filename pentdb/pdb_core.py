@@ -36,7 +36,6 @@ STALE_DAYS = 30  # 资产生命周期：last_seen 超过 N 天视为 stale
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
   name       TEXT PRIMARY KEY,
-  stages_enabled TEXT DEFAULT '',
   archived   INTEGER DEFAULT 0,
   profile    TEXT DEFAULT '',          -- 项目画像（面板 /api/projects 直接 SELECT；空=服务端按 attack-surface 兜底）
   created_at TEXT NOT NULL
@@ -62,7 +61,6 @@ CREATE TABLE IF NOT EXISTS raw_events (
   verified_at TEXT DEFAULT '',
   source     TEXT NOT NULL,
   origin     TEXT NOT NULL DEFAULT 'agent',
-  stage      TEXT DEFAULT '',
   attrs      TEXT DEFAULT '{}',          -- JSON 元数据（lifecycle 等面板侧状态；不动观测正文）
   created_at TEXT NOT NULL
 );
@@ -74,14 +72,6 @@ CREATE TABLE IF NOT EXISTS evidence (
   sha256     TEXT DEFAULT '',
   note       TEXT DEFAULT '',
   etype      TEXT DEFAULT '',              -- 证据类型：request/response/file（面板按类型渲染报文）
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS pending_tests (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  project    TEXT NOT NULL,
-  event_id   INTEGER NOT NULL,
-  term       TEXT NOT NULL,
-  stage      TEXT DEFAULT '',
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS waives (
@@ -205,10 +195,14 @@ BEFORE DELETE ON waives
 BEGIN
   SELECT RAISE(ABORT, 'waives 为 append-only，禁止 DELETE（真删除走 drop --confirm）');
 END;
+-- agent 直写 confirmed 仅限机器可验证事实 kind（--auto 门禁 DB 侧兜底）。
+-- 例外（v13）：plan-review 复盘结论是记录不是人审待办（记录与待办分离）——
+-- 落库即 confirmed，不进 /api/pending 队列；其余 agent note 仍一律 new 进待审。
 CREATE TRIGGER IF NOT EXISTS trg_events_agent_insert
 BEFORE INSERT ON raw_events
 WHEN NEW.origin = 'agent' AND NEW.status = 'confirmed'
      AND NEW.kind NOT IN ('domain','port','path','param','test','probe')
+     AND NOT (NEW.kind = 'note' AND NEW.value = 'plan-review')
 BEGIN
   SELECT RAISE(ABORT, 'agent 写入 confirmed 仅限机器可验证事实 kind（--auto 门禁 DB 侧兜底）');
 END;
@@ -233,6 +227,19 @@ AUDIT_TRIGGERS = (
 
 def now():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def resolve_path(path):
+    """证据路径解析：库里 evidence.path 历史上既有绝对路径、也有相对套件根的路径
+    （CLI 在仓库根下跑得过，面板进程 CWD 不同就误判"文件丢失"——2026-10-13 实证：
+    5 条相对路径证据在面板 lint 报 E-101 假阳性、堵死报告出口门禁）。
+    读侧统一在此收敛：绝对路径原样；相对路径按套件根（pentdb/ 上一级）解析；
+    空串原样返回。调用方不再各自 os.path.exists 裸路径。"""
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.path.dirname(BASE), path)
 
 
 # ---------------- exec 日志/证据读取统一口径（读上限 + 容错解码） ----------------
@@ -289,8 +296,11 @@ def dedup_key_for(value, title):
 # 完成即 commit 并推进 user_version。铁律：
 #   - sqlite connect() 禁裸 DML；
 #   - 迁移回填只能放在对应 ALTER 首次成功的分支内做，随即 commit 释放写锁；
-#   - 新增列一律追加迁移步并递增 SCHEMA_VERSION，不回改 SCHEMA 基线。
-SCHEMA_VERSION = 12
+#   - 新增列一律追加迁移步并递增 SCHEMA_VERSION，不回改 SCHEMA 基线；
+#   - 删除死结构（v14）例外：SCHEMA 基线与迁移步同步删——否则 drop --project 的
+#     executescript(SCHEMA) 会用 CREATE TABLE IF NOT EXISTS 复活死表；新库路径上
+#     v2 仍会按历史事实重新加列、v14 再删，链路诚实且收敛一致。
+SCHEMA_VERSION = 14
 
 
 def _mig_v1_schema(c):
@@ -473,11 +483,57 @@ def _mig_v12_projects_profile(c):
     c.commit()
 
 
+def _mig_v13_planreview_autoconfirm(c):
+    """v12→v13：plan-review 复盘结论落库即 confirmed（记录不是人审待办）。
+
+    策略背景（2026-10-13 待审队列改造，用户拍板"记录与待办分离"）：复盘结论是 AI 的
+    记录，躺在人审队列里没有可执行动作。改法=触发器白名单——trg_events_agent_insert
+    放行 (kind='note' AND value='plan-review') 的 agent confirmed 直写；其余 agent
+    推断类（finding/osint/suggestion/note）仍一律 new 进待审，门禁语义不变。
+
+    历史库迁移=DROP+CREATE 同条件触发器（幂等）；pdb_intents._plan_review 同步改
+    status='confirmed'。"""
+    c.executescript("""
+DROP TRIGGER IF EXISTS trg_events_agent_insert;
+CREATE TRIGGER IF NOT EXISTS trg_events_agent_insert
+BEFORE INSERT ON raw_events
+WHEN NEW.origin = 'agent' AND NEW.status = 'confirmed'
+     AND NEW.kind NOT IN ('domain','port','path','param','test','probe')
+     AND NOT (NEW.kind = 'note' AND NEW.value = 'plan-review')
+BEGIN
+  SELECT RAISE(ABORT, 'agent 写入 confirmed 仅限机器可验证事实 kind（--auto 门禁 DB 侧兜底）');
+END;
+""")
+    c.commit()
+
+
+def _mig_v14_drop_sop_remnants(c):
+    """v13→v14：R9 死 schema 清理（代码评审 2026-10-11 P2 项，SOP 面板页退役遗留）。
+
+    三处全库零业务读写（评审与 2026-10-14 复核均确认）：
+      pending_tests 表 / projects.stages_enabled 列 / raw_events.stage 列。
+    所有写入口（cmd_add/probe/migrate import）的 INSERT 列清单均不含 stage，
+    历史库残留列恒为默认空值，直接 DROP 无数据损失。
+
+    幂等语义（吸取 R13 迁移吞错教训）：仅 "no such column" 视为已删跳过，
+    其余异常照常抛出——真失败不静默、user_version 不推进。"""
+    c.execute("DROP TABLE IF EXISTS pending_tests")
+    for sql in ("ALTER TABLE projects DROP COLUMN stages_enabled",
+                "ALTER TABLE raw_events DROP COLUMN stage"):
+        try:
+            c.execute(sql)
+        except sqlite3.OperationalError as e:
+            if "no such column" not in str(e).lower():
+                raise
+    c.commit()
+
+
 # 迁移步注册表：下标 i 的函数把 user_version i 推进到 i+1（与 SCHEMA_VERSION 同步维护）
 _MIGRATIONS = (_mig_v1_schema, _mig_v2_columns, _mig_v3_evidence_etype,
                _mig_v4_waives_confirmed, _mig_v5_changelog_actor, _mig_v6_dedup_key,
                _mig_v7_waive_reject, _mig_v8_voided, _mig_v9_intents, _mig_v10_plan_steps,
-               _mig_v11_hints, _mig_v12_projects_profile)
+               _mig_v11_hints, _mig_v12_projects_profile, _mig_v13_planreview_autoconfirm,
+               _mig_v14_drop_sop_remnants)
 
 
 def _migrate(c):
@@ -538,8 +594,9 @@ def attach_evidence(c, project, event_id, path="", text=None, note="", keep_in_p
             f.write(text)
         src_desc = "text"
     else:
-        if not path or not os.path.exists(path):
+        if not path or not os.path.exists(resolve_path(path)):
             sys.exit(f"[x] 证据文件不存在: {path}")
+        path = resolve_path(path)  # 归一为绝对：后续 copy/keep_in_place/校验都不再吃 CWD 的亏
         if keep_in_place:
             stored = path
         else:

@@ -3,7 +3,8 @@
 覆盖（批次2，借鉴 Cairn Reason 任务）：
   1. 只读复盘：首次复盘触发判定；图变化后触发判定带增量；无变化可跳过
   2. 落库模式：--note 缺 --refs 拒绝；--refs 引用不存在观测拒绝；
-     合法结论落库 kind=note value=plan-review + changelog 检查点（events/hints/open_intents）
+     合法结论落库 kind=note value=plan-review + changelog 检查点（events/hints/open_intents）；
+     落库即 confirmed（记录不是人审待办，不进 /api/pending 队列）
   3. lint R-501（健康度非阻断）：复盘结论 detail 不含观测引用 '#' → warn；带【依据】#N → 不报
     （R-501 针对 legacy/手编数据，写入口 plan review 强制带 refs，故用直插模拟——
      changelog/raw_events 的防绕过触发器只拦 update/delete，insert new 态放行）
@@ -40,7 +41,7 @@ def add_event(proj, value="观测", **kw):
     base = dict(project=proj, ext_id="", kind="note", value=value, title="", detail="",
                 note="", source="ut", parent_ext="", merge_key="", status="new",
                 confidence="high", severity="", code="", tech="", service="", scope="in",
-                auto=False, update=False, origin="agent", stage="",
+                auto=False, update=False, origin="agent",
                 req="", resp="", waive_capture="", no_dedupe=False, intent_id=0)
     base.update(kw)
     return run(pentdb.cmd_add, **base)
@@ -123,6 +124,8 @@ class ReviewRecord(unittest.TestCase):
                             (self.PROJ,)).fetchone()
             self.assertEqual(row["kind"], "note")
             self.assertEqual(row["value"], "plan-review")
+            self.assertEqual(row["status"], "confirmed",
+                             "plan-review 是记录不是人审待办：落库即自动确认（记录与待办分离）")
             self.assertIn(f"#{eid}", row["detail"])
             self.assertIn("【依据】", row["detail"])
             chk = c.execute("SELECT detail FROM changelog WHERE project=? AND action='plan-review' "

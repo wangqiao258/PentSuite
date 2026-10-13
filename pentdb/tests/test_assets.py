@@ -24,7 +24,7 @@ def ns(**kw):
     base = dict(project=PROJ, ext_id="", kind="note", value="v", title="", detail="",
                 note="", source="unittest", parent_ext="", merge_key="", status="new",
                 confidence="", severity="", code="", tech="", service="", scope="in",
-                auto=False, update=False, origin="agent", stage="",
+                auto=False, update=False, origin="agent",
                 req="", resp="", waive_capture="")
     base.update(kw)
     return argparse.Namespace(**base)
@@ -43,6 +43,7 @@ def entities():
     for r in c.execute("SELECT * FROM assets WHERE project=?", (PROJ,)):
         d = dict(r)
         d["attrs"] = json.loads(d["attrs"] or "{}")
+        d["event_ids"] = json.loads(d["event_ids"] or "[]")
         rows[(d["atype"], d["akey"])] = d
     c.close()
     return rows
@@ -143,6 +144,34 @@ class RebuildMerge(unittest.TestCase):
         d = es[("domain", "api.example.com")]
         self.assertTrue(d["first_seen"])
         self.assertIn("scopes", d["attrs"])
+
+
+class TrailingSlashMerge(unittest.TestCase):
+    """尾斜杠归并（2026-10-13）：/xxx/ 与 /xxx 视为同一逻辑资源（Burp 忠实保留是会话语义，
+    资产库语义=逻辑资源），主形态=无尾斜杠，原始带斜杠形态进 attrs.aliases 留痕；根路径 "/" 不动。"""
+
+    @classmethod
+    def setUpClass(cls):
+        c = pentdb.connect()
+        c.execute("INSERT OR IGNORE INTO projects(name, created_at) VALUES(?,?)", (PROJ, pentdb.now()))
+        c.commit()
+        c.close()
+        add(kind="port", value="7.7.7.7:80", service="http", origin="human", status="confirmed")
+        add(kind="path", value="/ftp/", parent_ext="7.7.7.7", origin="human", status="confirmed")
+        add(kind="path", value="/ftp", parent_ext="7.7.7.7", origin="human", status="confirmed")
+        add(kind="path", value="/", parent_ext="7.7.7.7", origin="human", status="confirmed")
+
+    def test_slash_and_no_slash_merge_into_one(self):
+        es = entities()
+        self.assertIn(("endpoint", "7.7.7.7/ftp"), es)
+        self.assertNotIn(("endpoint", "7.7.7.7/ftp/"), es)  # 分裂对收敛
+        e = es[("endpoint", "7.7.7.7/ftp")]
+        self.assertEqual(e["attrs"].get("aliases"), ["/ftp/"])  # 原形态留痕
+        self.assertEqual(len(e["event_ids"]), 2)  # 两形态观测都挂同一实体
+
+    def test_root_path_kept(self):
+        es = entities()
+        self.assertIn(("endpoint", "7.7.7.7/"), es)  # 根路径不归一
 
 
 class EndpointHostBinding(unittest.TestCase):

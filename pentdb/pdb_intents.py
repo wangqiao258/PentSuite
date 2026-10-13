@@ -458,15 +458,18 @@ def _plan_review(c, a):
     if bad:
         sys.exit(f"[x] 引用的观测不存在: #{','.join(bad)}（本项目中核对后重试）")
     detail = a.note.strip() + "\n【依据】" + ",".join(f"#{r}" for r in refs)
+    # status=confirmed：plan-review 是 AI 的记录不是人审待办（记录与待办分离，
+    # 对齐成熟 inbox：队列里每条都必须有可执行动作）。人审待办只由 finding/osint/
+    # suggestion/test 承担；复盘内容本身在探索页/时间线可查。
     cur = c.execute(
         "INSERT INTO raw_events(project,kind,value,title,detail,status,confidence,source,origin,created_at) "
         "VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (proj, "note", "plan-review", "探索复盘", detail, "new", "high", "plan-review",
+        (proj, "note", "plan-review", "探索复盘", detail, "confirmed", "high", "plan-review",
          "agent", now()))
     log_change(c, proj, "plan-review",
                f"#{cur.lastrowid} events={c.execute('SELECT COUNT(*) n FROM raw_events WHERE project=? AND voided=0', (proj,)).fetchone()['n']}"
                f" hints={n_hints} open_intents={n_open} "
                f"｜ refs {','.join('#' + str(r) for r in refs)}")
     c.commit()
-    print(f"[ok] 复盘结论 #{cur.lastrowid} 已落库（kind=note value=plan-review）")
+    print(f"[ok] 复盘结论 #{cur.lastrowid} 已落库（kind=note value=plan-review，记录自动确认、不占人审待办）")
     print("     下一步: plan next 领步骤 / intent add 开新方向；批次收尾照常 lint")

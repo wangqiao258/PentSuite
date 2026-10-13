@@ -24,7 +24,7 @@ async function loadExplore(){
       const par=i.parent_id?` <span class="muted">← 父 #${i.parent_id}</span>`:"";
       return `<div class="fitem" style="margin-left:${depth*24}px">`+
         `<b>${esc(i.goal)}</b> ${exTag(label,color)} `+
-        `<span class="muted">#${i.id}${par} · ${i.created_at} · 挂接 ${i.event_n} 条观测</span>`+
+        `<span class="muted">#${i.id}${par} · ${fmtTime(i.created_at)} · 挂接 ${i.event_n} 条观测</span>`+
         (i.hypothesis?`<div class="detail">假设：${esc(i.hypothesis)}</div>`:"")+
         (i.note&&i.status!=="active"?`<div class="muted">收尾：${esc(i.note)}</div>`:"")+
         `</div>`;

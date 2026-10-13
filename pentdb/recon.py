@@ -125,7 +125,7 @@ def run(args):
             detail="", note=note, source=f"{source}；HTTP 探测 {res['url']}",
             parent_ext="", merge_key="", status="confirmed", confidence="high",
             severity="", code=str(res["code"]), tech=res["server"], service="",
-            scope="in", auto=True, update=True, origin="agent", stage="")
+            scope="in", auto=True, update=True, origin="agent",)
         try:
             pdb.cmd_add(ns)
             if is_update:
@@ -215,7 +215,7 @@ def run_js(args):
                     title="", detail="", note=f"来自 JS 提取（未探测，code 空）",
                     source=f"JS 解析 {u}", parent_ext=str(dom_row["id"]) if dom_row else "",
                     merge_key="", status="confirmed", confidence="medium", severity="",
-                    code="", tech="", service="", scope="in", auto=True, origin="agent", stage="",
+                    code="", tech="", service="", scope="in", auto=True, origin="agent",
                     update=False, req=None, resp=None, waive_capture=None)
                 try:
                     pdb.cmd_add(ns)
@@ -234,7 +234,7 @@ def run_js(args):
                         source=f"JS 解析 {u}", parent_ext="", merge_key="",
                         status="new", confidence="medium", severity="high",
                         code="", tech="", service="", scope="in", auto=False,
-                        origin="agent", stage="", update=False,
+                        origin="agent", update=False,
                         req="", resp="",
                         waive_capture="JS 静态发现无报文，人工验证后按七段补 req/resp 或确认豁免")
                     try:

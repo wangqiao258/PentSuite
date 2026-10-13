@@ -23,7 +23,7 @@ import urllib.parse
 from pdb_assets import cmd_add, tests_for_asset
 from pdb_core import (AUDIT_TRIGGERS, DB_PATH, SCHEMA, VALID_STATUS,
                       attach_evidence, connect, decode_text_compat, log_change,
-                      now, read_text_compat, require_project)
+                      now, read_text_compat, require_project, resolve_path)
 
 # ---------------- 漏洞生命周期（CLI/面板共用；存 finding 行 attrs JSON，与 status 人审态分离） ----------------
 
@@ -627,7 +627,7 @@ def exec_packets_for_asset(c, project, atype, akey, limit=10):
         (project,) + tuple(tids))
     out = []
     for ev in ev_rows:
-        pkt = parse_exec_log_file(ev["path"])
+        pkt = parse_exec_log_file(resolve_path(ev["path"]))
         if pkt is None:  # 证据丢失/非 exec curl 日志（python 脚本/空壳）：静默跳过（降级原则不变）
             continue
         out.append({"ev_id": ev["id"], "event_id": ev["event_id"],
@@ -722,7 +722,7 @@ def cmd_drop(a):
         # 先短暂解除，删除完成后经 executescript(SCHEMA) 幂等恢复全部审计触发器
         for t in AUDIT_TRIGGERS:
             c.execute(f"DROP TRIGGER IF EXISTS {t}")
-        for t in ("raw_events", "assets", "pending_tests", "waives", "evidence",
+        for t in ("raw_events", "assets", "waives", "evidence",
                   "intents", "plan_steps", "hints"):
             c.execute(f"DELETE FROM {t} WHERE project=?", (a.project,))
         if ev_ids:

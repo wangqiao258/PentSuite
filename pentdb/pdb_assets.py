@@ -9,6 +9,8 @@
   - findings_for_asset / tests_for_asset：finding·osint / test 按资产归属下钻（纯查询）
   - asset_review_state / asset_is_stale：实体人审聚合与生命周期
   - cmd_rebuild_assets / cmd_query / cmd_pending / cmd_review：查询与人审 CLI
+  - check_parent_semantics / _warn_parent_semantics：归因防呆（test 结论 vs parent
+    finding 显性错配 [warn]，XSS↔注入交叉检测，写入口 INSERT 前，add/exec 全覆盖）
 
 向下只依赖 pdb_core（attach_evidence 因 cmd_add/exec 双向需要上提到 core，见 pentdb.py 拆分说明）。
 """
@@ -21,6 +23,58 @@ import sys
 from pdb_core import (ASSET_KINDS, DB_PATH, FACT_KINDS, STALE_DAYS, VALID_KINDS,
                       VALID_ORIGIN, VALID_SEVERITY, VALID_SCOPE, attach_evidence,
                       connect, dedup_key_for, log_change, now, require_project)
+
+
+# ---------------- 归因防呆：test 结论 vs parent finding 显性错配检测（2026-10-13，U1） ----------------
+# 动机：demo-juiceshop 复测中 DOM XSS 结论三连错挂 #4655（登录 SQLi，CWE-89）——
+# #4680/#4686/#4693 parent 全指错，血缘图污染 + #4655 lifecycle reproduced 依据错位。
+# parent_ext 写入与 lint T-201 都只查存在性不查语义。策略：小而准的信号词交叉检测，
+# 显性错配打 [warn] 不阻断（误报会训练人忽略警告，宁缺勿滥）；只覆盖已真实踩中的
+# XSS↔注入交叉，其他组合不猜。挂接点=写入口 INSERT 前，add/exec 双通道全覆盖。
+_XSS_SIGNALS = ("xss", "innerhtml", "弹窗", "dom-xss", "domx", "alert(", "跨站脚本")
+_INJ_SIGNALS = ("sql", "union", "注入", "sqli", "or 1=1", "拖库")
+_CWE_INJ_FAMILY = {"CWE-89", "CWE-564"}
+_CWE_XSS_FAMILY = {"CWE-79", "CWE-80"}
+
+
+def check_parent_semantics(value, note, parent_row):
+    """test 结论 vs parent finding 的显性错配检测，返回警告文案（无错配返回 ""）。
+    parent_row 为 raw_events 行（须 kind=finding，sqlite3.Row/dict 均可）。
+    只做信号词交叉，不做语义理解——防呆不防呆外。"""
+    if parent_row is None:
+        return ""
+    try:
+        if parent_row["kind"] != "finding":
+            return ""
+        pid, cwe = parent_row["id"], (parent_row["ext_id"] or "").strip().upper()
+        label = (parent_row["title"] or parent_row["value"] or "")[:40]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    if not cwe:
+        return ""
+    text = ((value or "") + " " + (note or "")).lower()
+    if cwe in _CWE_INJ_FAMILY and any(s in text for s in _XSS_SIGNALS):
+        return (f"归因存疑：本条像 XSS/DOM 类结论，parent #{pid} 是 {cwe} 注入类 finding"
+                f"（{label}）——确认无误可忽略，挂错请改挂对应 finding 或新建")
+    if cwe in _CWE_XSS_FAMILY and any(s in text for s in _INJ_SIGNALS):
+        return (f"归因存疑：本条像 SQL 注入类结论，parent #{pid} 是 {cwe} XSS finding"
+                f"（{label}）——确认无误可忽略，挂错请改挂对应 finding 或新建")
+    return ""
+
+
+def _warn_parent_semantics(c, project, kind, parent_ext, value, note):
+    """写入口调用：对逗号分隔的每个 parent 做错配检测，命中打 [warn]（不阻断、不留痕）。
+    exec 经 cmd_add 落库，故本函数覆盖 add/exec 双通道。"""
+    if kind != "test" or not (parent_ext or "").strip():
+        return
+    for p in [x.strip() for x in parent_ext.split(",") if x.strip()]:
+        if not p.isdigit():
+            continue
+        prow = c.execute("SELECT id, kind, ext_id, title, value FROM raw_events "
+                         "WHERE id=? AND project=?", (int(p), project)).fetchone()
+        w = check_parent_semantics(value, note, prow)
+        if w:
+            print(f"[warn] {w}")
 
 
 def cmd_init(a):
@@ -231,6 +285,8 @@ def _add_write(c, a, status, req_val, resp_val, req_text, resp_text):
             sys.exit(f"[x] 探索意图不存在: #{intent_id}（先 intent add 创建，注意 --project 一致）")
         if irow["status"] != "active":
             sys.exit(f"[x] 探索意图 #{intent_id} 已关闭（{irow['status']}）：关闭后不再接受新挂接")
+    # U1 归因防呆：test 结论 vs parent finding 显性错配打 [warn]（不阻断，add/exec 全覆盖）
+    _warn_parent_semantics(c, a.project, a.kind, a.parent_ext, a.value, a.note)
     cur = c.execute(
         "INSERT INTO raw_events(project,ext_id,kind,value,title,detail,note,parent_ext,"
         "merge_key,status,confidence,severity,code,tech,service,scope,dedup_key,verified_at,source,origin,intent_id,created_at,updated_at) "
@@ -429,6 +485,9 @@ def cmd_probe_import(a):
 #   host     akey=ip/主机名（从 port 观测提取）  parent=无
 #   service  akey=host:port                     parent=host
 #   endpoint akey=host+path（param 并入 attrs.params，不再单独成行） parent=host
+#             尾斜杠归并（2026-10-13）：/xxx/ 与 /xxx 视为同一逻辑资源的两形态观测
+#             （Burp 忠实保留是会话语义；资产库语义=逻辑资源），主形态=无尾斜杠，
+#             原始带斜杠形态进 attrs.aliases 留痕；根路径 "/" 不动。
 
 def _norm_domain(value):
     """规范化域名 -> (akey, 注册域)；非法输入返回 (None, None)。"""
@@ -453,6 +512,18 @@ def _split_hostport(value):
     if not host or not port.isdigit():
         return v, ""
     return host, port
+
+
+def _norm_ep_path(p):
+    """endpoint 路径主形态归一：去尾斜杠（/xxx/ -> /xxx）。
+
+    根路径 "/" 与 rstrip 后为空的异常值原样返回（不产生空路径键）。
+    原始形态由调用方记 attrs.aliases 留痕（append-only 语义在 raw_events 层不受影响）。
+    """
+    if not p or p == "/":
+        return p
+    q = p.rstrip("/")
+    return q if q else p
 
 
 def _resolve_host(parent_ext, by_id, path_host, seen=None):
@@ -559,8 +630,12 @@ def rebuild_assets(c, project):
             if host in svc_keys:  # parent_ext 指向 service：上溯一层归其 host
                 host = host.rsplit(":", 1)[0]
             p = val if val.startswith("/") else "/" + val
+            raw = p
+            p = _norm_ep_path(p)  # 尾斜杠归并：主形态无尾斜杠，原形态进 aliases
             akey = (host + p) if host else ("?" + p)
             e = put("endpoint", akey, akey, "host", host, r)
+            if raw != p:
+                mul(e, "aliases", raw)
             mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
         elif r["kind"] == "param":
             host = _resolve_host(r["parent_ext"], by_id, path_host)
@@ -570,8 +645,12 @@ def rebuild_assets(c, project):
             paths = re.findall(r"/[^\s,]*", r["parent_ext"] or "")
             paths = [p for p in paths if len(p) > 1] or [""]
             for p in paths:
+                raw = p
+                p = _norm_ep_path(p) if p else p  # 尾斜杠归并（同 path 分支）
                 akey = ((host + p) if host else ("?" + p)) if p else ("?" + val)
                 e = put("endpoint", akey, akey, "host", host, r)
+                if p and raw != p:
+                    mul(e, "aliases", raw)
                 mul(e, "params", val); mul(e, "codes", r["code"]); mul(e, "titles", r["title"])
 
     # parent_atype 语义修正（仅 service）：parent 解析值若实为库内域名（且无同名 host 实体），记真实类型 domain。
@@ -804,11 +883,13 @@ def cmd_pending(a):
         c.close()
 
 
-def apply_review(c, eid, action, note="", reviewer="human"):
+def apply_review(c, eid, action, note="", reviewer="human", cascade=""):
     """人审落库核心（CLI review 与面板 /api/review 共用，单一实现保证 reviews/changelog/
     actor 语义一致）：改状态 + reviews 追加留痕 + changelog 留痕（actor=reviewer）。
     事件不存在返回 None；已同值幂等跳过返回 "skip"（不重复写 reviews/changelog）；
-    正常落库返回所属 project。不 commit——由调用方决定提交时机（面板批量=单事务原子提交）。"""
+    正常落库返回所属 project。不 commit——由调用方决定提交时机（面板批量=单事务原子提交）。
+    cascade：父子继承级联标注（如"随 #4694 confirmed 一并处置"）——人的一次决定覆盖
+    一组事件时，changelog 区分主动审与连带采信/驳回，reviews 的 note 保持用户批注原文。"""
     row = c.execute("SELECT project, status, kind FROM raw_events WHERE id=?", (eid,)).fetchone()
     if not row:
         return None
@@ -817,7 +898,8 @@ def apply_review(c, eid, action, note="", reviewer="human"):
     c.execute("UPDATE raw_events SET status=? WHERE id=?", (action, eid))
     c.execute("INSERT INTO reviews(event_id, action, reviewer, note, at) VALUES(?,?,?,?,?)",
               (eid, action, reviewer, note or "", now()))
-    log_change(c, row["project"], "review", f"#{eid} -> {action}", actor=reviewer or "human")
+    log_change(c, row["project"], "review",
+               f"#{eid} -> {action}" + (f"（{cascade}）" if cascade else ""), actor=reviewer or "human")
     if action == "rejected":
         # 人审驳回联动作废：终结挂在该事件上的豁免草稿（confirmed=0→2），
         # 避免孤儿豁免继续占"豁免待确认"提示位。联动源=人对本事件的驳回决定，

@@ -125,7 +125,7 @@ class Ingest(unittest.TestCase):
             project=PROJ, ext_id="", kind="probe", value="add-ut.com", title="200 add-ut.com/y",
             detail="", note="", source="ut", parent_ext="", merge_key="", status="confirmed",
             confidence="high", severity="", code="", tech="", service="", scope="in",
-            auto=True, update=False, origin="agent", stage="", req="", resp="", waive_capture=""))
+            auto=True, update=False, origin="agent", req="", resp="", waive_capture=""))
         after = c.execute("SELECT count(*) FROM raw_events WHERE project=? AND kind='probe' AND value='add-ut.com'",
                           (PROJ,)).fetchone()[0]
         self.assertEqual(after, before + 1)

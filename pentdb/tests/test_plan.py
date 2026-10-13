@@ -25,7 +25,7 @@ def ns(**kw):
     base = dict(project=PROJ, ext_id="", kind="note", value="v", title="", detail="",
                 note="", source="ut", parent_ext="1", merge_key="", status="new",
                 confidence="high", severity="", code="", tech="", service="", scope="in",
-                auto=False, update=False, origin="agent", stage="",
+                auto=False, update=False, origin="agent",
                 req="", resp="", waive_capture="", no_dedupe=False)
     base.update(kw)
     return argparse.Namespace(**base)

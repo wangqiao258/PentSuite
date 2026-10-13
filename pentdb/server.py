@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """PentDB 人看面板（stdlib，零依赖）。端口 8766，避免与旧 assetdb 面板 8765 冲突。"""
+import datetime
 import json
 import os
 import sys
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from pdb_core import resolve_path
+
 BASE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE, "data", "pentdb.db")
 WEB = os.path.join(BASE, "web", "index.html")
 # 静态资源白名单（web/ 目录按视图域拆分：html/css + 5 个 app.*.js）
 STATIC = {
@@ -20,6 +23,45 @@ STATIC = {
     "/app.report.js": ("app.report.js", "text/javascript; charset=utf-8"),
     "/app.explore.js": ("app.explore.js", "text/javascript; charset=utf-8"),
 }
+
+
+def attach_parent_summary(c, rows):
+    """给待审队列的 test 行附加母 finding 摘要（平铺+链接模式：审一条复测结论必须看到
+    被审对象——母发现标题/严重度/人审态/生命周期；缺了它队列只剩 120 字备注无从决策）。
+    与 sync_lifecycle_from_test 同语义：parent_ext 只认数字 id 且 kind=finding，取首个。
+    原地修改 rows（dict 行）并返回 pmap（母 finding id → 摘要，供测试断言）。"""
+    pids = set()
+    for r in rows:
+        if r["kind"] == "test":
+            for x in (r["parent_ext"] or "").split(","):
+                x = x.strip()
+                if x.isdigit():
+                    pids.add(int(x))
+    pmap = {}
+    if pids:
+        ph = ",".join("?" * len(pids))
+        for pr in c.execute(
+                f"SELECT id, kind, title, value, severity, status, attrs "
+                f"FROM raw_events WHERE id IN ({ph})", tuple(pids)):
+            if pr["kind"] != "finding":
+                continue  # 与 lifecycle 联动同语义：只认母 finding
+            try:
+                life = (json.loads(pr["attrs"] or "{}") or {}).get("lifecycle", "")
+            except (TypeError, ValueError):
+                life = ""
+            pmap[pr["id"]] = {"id": pr["id"], "title": pr["title"] or pr["value"],
+                              "severity": pr["severity"] or "",
+                              "status": pr["status"], "lifecycle": life}
+    for r in rows:
+        r["parent"] = None
+        if r["kind"] != "test":
+            continue
+        for x in (r["parent_ext"] or "").split(","):
+            x = x.strip()
+            if x.isdigit() and int(x) in pmap:
+                r["parent"] = pmap[int(x)]
+                break
+    return pmap
 
 
 def db():
@@ -40,6 +82,29 @@ def int_param(q, name, default="0"):
         return None
 
 
+# 兜底异常日志（N6）：面板以 stdout/stderr=DEVNULL 静默拉起且 log_message 是空实现，
+# 异常若不落盘，线上无从排查。写日志自身失败不得影响响应，故内部全裸 try。
+LOG_DIR = os.path.join(BASE, "logs")
+LOG_PATH = os.path.join(LOG_DIR, "panel_server.log")
+
+
+def log_exception(where, exc):
+    """追加一条兜底异常日志：时间戳 + 出错位置 + 异常摘要 + 完整 traceback。"""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("[%s] %s %s: %s\n%s\n" % (
+                datetime.datetime.now().isoformat(timespec="seconds"),
+                where, type(exc).__name__, exc,
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))))
+    except Exception:
+        pass  # 日志通道自身故障（磁盘满/权限）不能把异常升级成响应失败
+
+
+# POST body 非法 JSON 哨兵：_read_json 已回 400，路由见之直接 return（省 7 处重复解析）
+_BAD_JSON = object()
+
+
 # 漏洞生命周期（与 raw_events.status 人审态分离；存 finding 行 attrs JSON）
 LIFE_CODES = ("open", "reproduced", "not-reproduced", "fixed", "reopened")
 
@@ -51,8 +116,44 @@ def set_lifecycle(c, project, fid, code, note=""):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # 响应是否已开始发送（send_response 内置位）：兜底补 500 前检查，防 double-send
+    _responded = False
+
     def log_message(self, fmt, *args):
         pass
+
+    def send_response(self, *args, **kwargs):
+        # http.server 全部响应出口（_json/send_error/静态文件）都经此处，置位即"响应头已发"
+        self._responded = True
+        super().send_response(*args, **kwargs)
+
+    def _fail(self, exc, where):
+        """顶层兜底（R2）：异常落盘；尚未发响应则补 500 JSON；已发响应（如 _json 写到
+        一半失败）只记日志——同一连接不能发第二个响应，否则协议错乱。"""
+        log_exception(where, exc)
+        if self._responded:
+            return
+        try:
+            self._json({"error": "internal server error: %s" % exc}, 500)
+        except Exception:
+            pass  # 客户端已断开等：补发失败不再扩散
+
+    def _read_json(self):
+        """POST body → dict。Content-Length 缺失/非数字、非 UTF-8、非 JSON、非对象
+        一律按坏请求处理：回 400 {"error":"invalid json"} 并返回哨兵 _BAD_JSON。"""
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        raw = self.rfile.read(n) if n > 0 else b""
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            data = _BAD_JSON
+        if data is _BAD_JSON or not isinstance(data, dict):
+            self._json({"error": "invalid json"}, 400)
+            return _BAD_JSON
+        return data
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -63,6 +164,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        # 顶层兜底（R2）：路由体任何异常都转 500 JSON + 落盘日志，绝不裸奔杀死连接
+        try:
+            self._route_get()
+        except Exception as e:
+            self._fail(e, "do_GET")
+
+    def _route_get(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         if u.path in ("/", "/index.html"):
@@ -215,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
                     ev_sql += " AND 0"  # 无观测事件：直接空证据集
                 evidence = []
                 for r in rows_to_dicts(c.execute(ev_sql + " ORDER BY e.id", args)):
-                    r["exists"] = os.path.exists(r["path"])
+                    r["exists"] = os.path.exists(resolve_path(r["path"]))
                     evidence.append(r)
                 self._json({"findings": pentdb.findings_for_asset(c, p, atype, akey),
                             "exec_packets": pentdb.exec_packets_for_asset(c, p, atype, akey),
@@ -234,7 +342,7 @@ class Handler(BaseHTTPRequestHandler):
                         args += ids
                 rows = []
                 for r in rows_to_dicts(c.execute(sql + " ORDER BY e.id DESC", args)):
-                    r["exists"] = os.path.exists(r["path"])
+                    r["exists"] = os.path.exists(resolve_path(r["path"]))
                     rows.append(r)
                 self._json({"evidence": rows})
             elif u.path == "/api/evidence/view":
@@ -244,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
                 row = c.execute("SELECT * FROM evidence WHERE id=?", (eid,)).fetchone()
                 if not row:
                     return self._json({"error": "no evidence"}, 404)
-                path = row["path"]
+                path = resolve_path(row["path"])
                 if not os.path.exists(path):
                     return self._json({"error": "file missing", "path": path}, 404)
                 import pentdb
@@ -272,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
                 row = c.execute("SELECT * FROM evidence WHERE id=?", (eid,)).fetchone()
                 if not row:
                     return self._json({"error": "no evidence"}, 404)
-                path = row["path"]
+                path = resolve_path(row["path"])
                 if not os.path.exists(path):
                     return self._json({"error": "file missing", "path": path}, 404)
                 import pentdb
@@ -395,6 +503,8 @@ class Handler(BaseHTTPRequestHandler):
                     s = stat.get(r["value"], {})
                     r["dup_confirmed"] = s.get("confirmed", 0)
                     r["dup_rejected"] = s.get("rejected", 0)
+                # 母 finding 摘要（平铺+链接模式：test 行决策需要看到被审对象）
+                attach_parent_summary(c, rows)
                 self._json({"pending": rows})
             elif u.path == "/api/report":
                 p = q.get("project", [""])[0]
@@ -428,10 +538,18 @@ class Handler(BaseHTTPRequestHandler):
             c.close()
 
     def do_POST(self):
+        # 顶层兜底（R2）：同 do_GET——写路由异常也转 500 JSON + 落盘日志
+        try:
+            self._route_post()
+        except Exception as e:
+            self._fail(e, "do_POST")
+
+    def _route_post(self):
         u = urlparse(self.path)
         if u.path == "/api/retest":
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            data = self._read_json()
+            if data is _BAD_JSON:
+                return
             import argparse
             import pentdb
             fid = data.get("finding_id")
@@ -471,8 +589,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e)}, 400)
             return self._json({"ok": True, "id": new_id})
         if u.path == "/api/manual-add":
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            data = self._read_json()
+            if data is _BAD_JSON:
+                return
             import argparse
             import pentdb
             kind, value = data.get("kind"), (data.get("value") or "").strip()
@@ -495,8 +614,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in ("/api/waive/confirm", "/api/waive/reject"):
             # 豁免确认/作废（人的决定，对齐 CLI waive --wid N --confirm/--reject）：
             # 面板点击=人工操作，actor=human 留痕；wid 支持单值或 wids 数组批量
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            data = self._read_json()
+            if data is _BAD_JSON:
+                return
             project = (data.get("project") or "").strip()
             wids = data.get("wids") or ([data.get("wid")] if data.get("wid") else [])
             try:
@@ -537,8 +657,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/waive/draft":
             # 豁免起草（AI/面板均可起草，确认生效仍需人在发现页或 CLI --confirm）：
             # 复用 cmd_waive 同一实现——校验记录归属、强制 term/reason、留痕（起草，待人工确认）
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            data = self._read_json()
+            if data is _BAD_JSON:
+                return
             project = (data.get("project") or "").strip()
             eid = data.get("id")
             term = (data.get("term") or "").strip()
@@ -548,7 +669,11 @@ class Handler(BaseHTTPRequestHandler):
             import argparse as _ap
             import pentdb
             try:
-                pentdb.cmd_waive(_ap.Namespace(project=project, id=int(eid), wid=0,
+                eid_int = int(eid)
+            except (TypeError, ValueError):
+                return self._json({"error": "bad id"}, 400)
+            try:
+                pentdb.cmd_waive(_ap.Namespace(project=project, id=eid_int, wid=0,
                                                term=term, reason=reason,
                                                confirm=False, reject=False))
             except SystemExit as e:
@@ -556,15 +681,16 @@ class Handler(BaseHTTPRequestHandler):
             c3 = db()
             try:
                 row = c3.execute("SELECT id FROM waives WHERE project=? AND event_id=? AND term=? "
-                                 "ORDER BY id DESC LIMIT 1", (project, int(eid), term)).fetchone()
+                                 "ORDER BY id DESC LIMIT 1", (project, eid_int, term)).fetchone()
                 return self._json({"ok": True, "wid": row["id"] if row else None})
             finally:
                 c3.close()
         if u.path == "/api/void":
             # 记录作废/恢复（人的决定，对齐 CLI void）：冗余/误录数据清理通道，
             # 作废记录退出 lint 阻断/报告/面板主视图；复用 cmd_void 同一实现留痕 actor=human
-            n = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            data = self._read_json()
+            if data is _BAD_JSON:
+                return
             project = (data.get("project") or "").strip()
             ids = data.get("ids") or []
             reason = (data.get("reason") or "").strip()
@@ -576,16 +702,21 @@ class Handler(BaseHTTPRequestHandler):
             import argparse as _ap
             import pentdb
             try:
+                ids_csv = ",".join(str(int(i)) for i in ids)
+            except (TypeError, ValueError):
+                return self._json({"error": "bad ids"}, 400)
+            try:
                 pentdb.cmd_void(_ap.Namespace(project=project, id=0,
-                                              ids=",".join(str(int(i)) for i in ids),
+                                              ids=ids_csv,
                                               reason=reason, undo=undo))
             except SystemExit as e:
                 return self._json({"error": str(e).strip() or "void 失败"}, 400)
             return self._json({"ok": True})
         if u.path != "/api/review":
             return self._json({"error": "not found"}, 404)
-        n = int(self.headers.get("Content-Length", 0))
-        data = json.loads(self.rfile.read(n).decode("utf-8"))
+        data = self._read_json()
+        if data is _BAD_JSON:
+            return
         action = data.get("action")
         ids = data.get("ids") or ([data["id"]] if data.get("id") is not None else [])
         note = (data.get("note") or "").strip()
@@ -597,8 +728,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad action"}, 400)
         if not ids:
             return self._json({"error": "no ids"}, 400)
-        if len(ids) > 1 and not note:
-            return self._json({"error": "批量操作必须留批注（写入每条留痕，防止无脑盖章）"}, 400)
+        if not note:
+            return self._json({"error": "人审必须留批注（写入留痕，防止无脑盖章；驳回建议前缀：误报/越界/无法复现/重复）"}, 400)
+        # 父子继承（B 方案）：cascade_from=主动审的 finding id——同批其余 id 为连带处置
+        # （人的一次决定覆盖一组事件），changelog 逐条标注级联来源；reviews note 保持批注原文
+        cascade_from = data.get("cascade_from")
+        try:
+            cascade_from = int(cascade_from) if cascade_from is not None else None
+        except (TypeError, ValueError):
+            return self._json({"error": "bad cascade_from"}, 400)
         # 人审落库统一走 pdb 层 apply_review（与 CLI review 同一实现）：
         # reviews 留痕 + changelog actor=human 语义一致；批量共用单连接单事务，finally 统一提交。
         import pdb_assets
@@ -606,7 +744,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             ok, missing = [], []
             for eid in ids:
-                r = pdb_assets.apply_review(c, eid, action, note=note, reviewer="human")
+                cascade = ""
+                if cascade_from is not None and eid != cascade_from:
+                    cascade = f"随 #{cascade_from} {action} 一并处置（父子继承）"
+                r = pdb_assets.apply_review(c, eid, action, note=note, reviewer="human",
+                                            cascade=cascade)
                 if r is None:
                     missing.append(eid)
                     continue

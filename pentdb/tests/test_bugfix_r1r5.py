@@ -3,9 +3,12 @@
 """BugFix 批次 R1-R5 回归单测（stdlib unittest，零依赖）。
 
 独立验证工程师本批修复（非橡皮图章——每条都用全新场景重证）：
-  F1a 全新库 connect 后 user_version=12、projects 含 profile 列；
+  F1a 全新库 connect 后 user_version=14、projects 含 profile 列、
+      trg_events_agent_insert 含 plan-review 白名单（v13）；
+      v14 死 schema 清理落地（pending_tests 表与 stage/stages_enabled 列不复存在）；
       /api/projects 同款 SQL 不炸（子进程+独立临时库，含 v11 历史库迁移复现场景）
-  F1b _mig_v12_projects_profile 幂等：已含 profile 列再跑不报错
+  F1b _mig_v12_projects_profile / _mig_v13_planreview_autoconfirm / _mig_v14_drop_sop_remnants
+      幂等：已迁移库再跑不报错、版本不被回拨
   F2  cmd_drop 级联清 intents/plan_steps/hints，changelog 墓碑在，审计触发器恢复
   F3a cmd_add 返回真实事件 id（新建/重扫更新/dedup 合并三出口）；test 幂等命中仍拒写
   F3b exec 通道证据挂在 cmd_add 返回的事件 id 上（后有新行也不挂错）
@@ -31,7 +34,7 @@ def ns(**kw):
     base = dict(project="", ext_id="", kind="note", value="v", title="", detail="",
                 note="", source="bugfix-ut", parent_ext="", merge_key="", status="new",
                 confidence="", severity="", code="", tech="", service="", scope="in",
-                auto=False, update=False, origin="human", stage="",
+                auto=False, update=False, origin="human",
                 req="", resp="", waive_capture="", no_dedupe=False, intent_id=0)
     base.update(kw)
     return argparse.Namespace(**base)
@@ -41,7 +44,7 @@ def count(c, table, proj):
     return c.execute(f"SELECT count(*) FROM {table} WHERE project=?", (proj,)).fetchone()[0]
 
 
-class F1SchemaV12FreshDb(unittest.TestCase):
+class F1SchemaFreshDb(unittest.TestCase):
     """F1a：子进程 + 全新独立临时库（与套件共享库隔离，真实复现新装/历史库场景）。"""
 
     CHILD = r"""
@@ -49,13 +52,22 @@ import pentdb
 
 SQL = "SELECT name, profile, archived FROM projects ORDER BY archived, name"
 
-# 场景1：全新库——建库即 v12 且 /api/projects 同款 SQL 不炸
+# 场景1：全新库——建库即 v14 且 /api/projects 同款 SQL 不炸
 c = pentdb.connect()
 ver = c.execute("PRAGMA user_version").fetchone()[0]
-assert ver == 12, "user_version=%r" % (ver,)
+assert ver == 14, "user_version=%r" % (ver,)
 cols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
 assert "profile" in cols, cols
 list(c.execute(SQL))
+# v13：plan-review 白名单必须进触发器（记录不是人审待办）
+trg = c.execute("SELECT sql FROM sqlite_master WHERE name='trg_events_agent_insert'").fetchone()["sql"]
+assert "plan-review" in trg, trg
+# v14：R9 死 schema 清理——pending_tests 表与 stage/stages_enabled 列不复存在
+tabs = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+assert "pending_tests" not in tabs, tabs
+assert "stages_enabled" not in cols, cols
+ecols = [r[1] for r in c.execute("PRAGMA table_info(raw_events)")]
+assert "stage" not in ecols, ecols
 
 # 场景2：模拟 v11 历史库（无 profile 列——修复前 /api/projects 必炸的库形）
 # → connect() 应自动迁移补列；之后同款 SQL 不炸
@@ -65,7 +77,7 @@ c.commit()
 c.close()
 c2 = pentdb.connect()
 ver2 = c2.execute("PRAGMA user_version").fetchone()[0]
-assert ver2 == 12, "migrated user_version=%r" % (ver2,)
+assert ver2 == 14, "migrated user_version=%r" % (ver2,)
 cols2 = [r[1] for r in c2.execute("PRAGMA table_info(projects)")]
 assert "profile" in cols2, cols2
 list(c2.execute(SQL))
@@ -85,15 +97,22 @@ print("CHILD-OK")
                          % (cp.stdout, cp.stderr))
         self.assertIn("CHILD-OK", cp.stdout)
 
-    def test_mig_v12_idempotent(self):
-        """F1b：已含 profile 列的库再跑迁移步不报错、列不丢、版本不被回拨。"""
+    def test_mig_steps_idempotent(self):
+        """F1b：已迁移库再跑 v12/v13/v14 迁移步不报错、列不丢、版本不被回拨。"""
         c = pentdb.connect()
         try:
             pdb_core._mig_v12_projects_profile(c)  # 列已存在 → OperationalError → return
             pdb_core._mig_v12_projects_profile(c)  # 连跑两次仍幂等
+            pdb_core._mig_v13_planreview_autoconfirm(c)  # DROP+CREATE 幂等
+            pdb_core._mig_v13_planreview_autoconfirm(c)
+            pdb_core._mig_v14_drop_sop_remnants(c)  # 列已删 → no such column 跳过
+            pdb_core._mig_v14_drop_sop_remnants(c)
             cols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
             self.assertIn("profile", cols)
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 12)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 14)
+            trg = c.execute("SELECT sql FROM sqlite_master WHERE name='trg_events_agent_insert'"
+                            ).fetchone()["sql"]
+            self.assertIn("plan-review", trg)
             # /api/projects 同款 SQL 在共享库上同样不炸
             list(c.execute("SELECT name, profile, archived FROM projects "
                            "ORDER BY archived, name"))
@@ -125,7 +144,7 @@ class F2DropCascade(unittest.TestCase):
         c = pentdb.connect()
         try:
             for t in ("intents", "plan_steps", "hints", "raw_events", "assets",
-                      "pending_tests", "waives", "evidence"):
+                      "waives", "evidence"):
                 self.assertEqual(count(c, t, self.PROJ), 0, f"drop 后 {t} 应清零")
             self.assertIsNone(c.execute("SELECT name FROM projects WHERE name=?",
                                         (self.PROJ,)).fetchone())

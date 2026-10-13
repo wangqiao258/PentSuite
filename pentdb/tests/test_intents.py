@@ -1,8 +1,8 @@
 """探索血缘与计划层单测（stdlib unittest，零依赖）。运行：python -m unittest test_intents -v
 
 覆盖：
-  1. Schema v9-v12 迁移：intents/plan_steps/hints 建表、raw_events.intent_id 加列、
-     projects.profile 加列、user_version=12
+  1. Schema v9-v14 迁移：intents/plan_steps/hints 建表、raw_events.intent_id 加列、
+     projects.profile 加列、plan-review 自动确认触发器白名单、v14 死 schema 清理、user_version=14
   2. intent 域：add/list/show/close；关闭后拒绝新挂接；父链校验
   3. add --intent 挂血缘（含 --update 补挂、重扫更新保留原意图）
   4. plan 域：依赖置 blocked、plan next 只出前置已满足步骤、done/skip 自动解锁下游
@@ -29,7 +29,7 @@ def ns_add(**kw):
     base = dict(project=PROJ, ext_id="", kind="note", value="v", title="", detail="",
                 note="", source="ut", parent_ext="1", merge_key="", status="new",
                 confidence="high", severity="", code="", tech="", service="", scope="in",
-                auto=False, update=False, origin="agent", stage="",
+                auto=False, update=False, origin="agent",
                 req="", resp="", waive_capture="", no_dedupe=False, intent_id=0)
     base.update(kw)
     return argparse.Namespace(**base)
@@ -51,10 +51,10 @@ def plan_ns(cmd, **kw):
 
 
 class Migration(unittest.TestCase):
-    def test_schema_v12(self):
+    def test_schema_v13(self):
         c = pentdb.connect()
         try:
-            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 12)
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 14)
             names = {r[0] for r in c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertIn("intents", names)
@@ -64,6 +64,10 @@ class Migration(unittest.TestCase):
             self.assertIn("intent_id", cols)
             pcols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
             self.assertIn("profile", pcols)
+            # v13：plan-review 白名单已进触发器（agent confirmed 仅放行记录类 note）
+            trg = c.execute("SELECT sql FROM sqlite_master WHERE name='trg_events_agent_insert'"
+                            ).fetchone()["sql"]
+            self.assertIn("plan-review", trg)
         finally:
             c.close()
 
